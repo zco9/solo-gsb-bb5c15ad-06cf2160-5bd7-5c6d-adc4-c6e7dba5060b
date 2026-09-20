@@ -19,13 +19,19 @@ function check(name, cond) {
   else { failed++; console.log(`  ✘ ${name}`); }
 }
 
-// 浏览器版 public/replay.js 的纯函数确定性重放器，在 Node 中加载以复用同一份实现
+// 浏览器版 public/replay-core.js（共享折叠内核）与 public/replay.js（复盘门面）
+// 在 Node 中依次装入，以复用与浏览器完全相同的一份状态机实现
 function loadBrowserReplay() {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'replay.js'), 'utf8');
-  const sandbox = { structuredClone: (o) => JSON.parse(JSON.stringify(o)) };
-  const fn = new Function('structuredClone',
-    src.replace('const Replay = (() => {', 'return (() => {'));
-  return fn(sandbox.structuredClone);
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
+  const coreSrc = read('replay-core.js')
+    .replace(/\nif \(typeof module[\s\S]*$/, '')
+    .replace('const ReplayCore = (() => {', 'return (() => {');
+  const core = new Function(coreSrc)();
+  globalThis.ReplayCore = core;
+  const src = read('replay.js')
+    .replace(/\nif \(typeof module[\s\S]*$/, '')
+    .replace('const Replay = (() => {', 'return (() => {');
+  return new Function('ReplayCore', src)(core);
 }
 
 const SESSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';

@@ -21,15 +21,18 @@ function check(name, cond) {
   else { failed++; console.log(`  ✘ ${name}`); }
 }
 
-// 与 test/playlist.js 同一方式把浏览器脚本装入 Node
-function loadBrowserModule(file, factoryName) {
+// 与 test/playlist.js 同一方式把浏览器脚本装入 Node；latency.js 依赖共享内核
+// public/replay-core.js，先装入内核，再作为全局入参装入分析器
+function loadBrowserModule(file, factoryName, globals = {}) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8');
   const withoutExport = src.replace(/\nif \(typeof module[\s\S]*$/, '');
-  const fn = new Function(withoutExport.replace(`const ${factoryName} = (() => {`, 'return (() => {'));
-  return fn();
+  const fn = new Function(...Object.keys(globals),
+    withoutExport.replace(`const ${factoryName} = (() => {`, 'return (() => {'));
+  return fn(...Object.values(globals));
 }
 
-const L = loadBrowserModule('latency.js', 'CueLatency');
+const ReplayCore = loadBrowserModule('replay-core.js', 'ReplayCore');
+const L = loadBrowserModule('latency.js', 'CueLatency', { ReplayCore });
 
 function httpGet(urlPath) {
   return new Promise((resolve, reject) => {

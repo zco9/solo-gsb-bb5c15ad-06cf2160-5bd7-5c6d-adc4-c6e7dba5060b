@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 const replay = require('./replay');
+const ReplayCore = require('./public/replay-core'); // Node / 浏览器共用的事件折叠内核
 
 // 口令文本规范化：NFKC 全角/半角统一（全角空格 U+3000 等在这一步归一为 ASCII 空白）→
 // 删除汉字之间 / 汉字两侧的排版空白（中文口令中的空格通常只是排版）→
@@ -50,94 +51,27 @@ function cueKey(cue) {
 }
 
 // ---------------------------------------------------------------------------
-// 单场口令指标提取：完全基于 replay 单场接口返回的事件流（保持日志行序）
+// 单场口令指标提取：直接基于共享事件折叠内核（public/replay-core.js）按日志行序
+// 折叠出的场次 / 口令 / 轮次模型（与复盘 foldUntil、确认延迟诊断同一状态机）。
 //
 // 每条口令统计：
 //   durationMs  从口令开始（首次 cue-started；修订重发不重置，即「从口令开始到完成」）
 //               到 cue-completed 的墙钟耗时；未闭合口令为 null
-//   timeouts    确认超时次数（cue-timeout 事件数；修订后再次超时累计）
-//   lateConfirms 迟到确认次数（confirm-late 事件数）
-//   revisions   修订次数（修订号 - 1，即 cue-resent / cue-recalled 次数）
-//   pauses      暂停次数（cue-paused 事件数）
+//   timeouts    确认超时次数（归属到该口令各轮次的 cue-timeout；修订后再次超时累计）
+//   lateConfirms 迟到确认次数（confirm-late，按归属轮次计入口令）
+//   revisions   修订次数（修订轮次数，即 cue-resent / cue-recalled 次数）
+//   pauses      暂停次数（归属到该口令各轮次的 cue-paused）
 //   finalText   最终修订版文本（未修订时等于原文本）
-// 同时返回每条口令开始事件的相对偏移 startT，供前端跳转复盘时刻。
+// 匹配键由本模块的规范化策略经 keyBuilder 注入（内核不依赖具体规范化）。
+// startT 为口令开始事件的相对偏移，供前端跳转复盘时刻。
 // ---------------------------------------------------------------------------
 function extractCues(sessionData) {
   const events = Array.isArray(sessionData.events) ? sessionData.events : [];
-  const bySeq = new Map();
-
-  const ensure = (seq) => {
-    let c = bySeq.get(seq);
-    if (!c) {
-      c = {
-        seq,
-        text: '',
-        targets: [],
-        key: null,
-        startT: null,
-        completeT: null,
-        durationMs: null,
-        timeouts: 0,
-        lateConfirms: 0,
-        revisions: 0,
-        pauses: 0,
-        finalText: '',
-      };
-      bySeq.set(seq, c);
-    }
-    return c;
-  };
-
-  for (const ev of events) {
-    const d = (ev && ev.detail) || {};
-    const seq = Number(d.seq);
-    if (!Number.isInteger(seq) || seq <= 0) continue;
-
-    switch (ev.event) {
-      case 'cue-started': {
-        // 同 seq 的修订重发不再产生 cue-started（重发事件为 cue-resent），
-        // 此处登记的即该口令的冻结快照与开始时刻
-        const c = ensure(seq);
-        if (!c.text) {
-          c.text = String(d.text || '');
-          c.targets = Array.isArray(d.targets)
-            ? [...new Set(d.targets.map((t) => String(t).trim()).filter(Boolean))]
-            : [];
-          c.key = cueKey({ text: c.text, targets: c.targets });
-          c.finalText = c.text;
-        }
-        if (c.startT == null) c.startT = ev.t;
-        break;
-      }
-      case 'cue-resent': {
-        const c = ensure(seq);
-        c.revisions += 1;
-        if (d.text) c.finalText = String(d.text);
-        break;
-      }
-      case 'cue-completed': {
-        const c = ensure(seq);
-        if (c.completeT == null) {
-          c.completeT = ev.t;
-          if (c.startT != null) c.durationMs = ev.t - c.startT;
-        }
-        break;
-      }
-      case 'cue-timeout':
-        ensure(seq).timeouts += 1;
-        break;
-      case 'confirm-late':
-        ensure(seq).lateConfirms += 1;
-        break;
-      case 'cue-paused':
-        ensure(seq).pauses += 1;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  const timeoutSec = Number(sessionData && sessionData.timeoutSec);
+  return ReplayCore.extractCues(events, {
+    timeoutSec: Number.isFinite(timeoutSec) && timeoutSec > 0 ? timeoutSec : undefined,
+    keyBuilder: (cue) => cueKey({ text: cue.originalText, targets: cue.targets }),
+  });
 }
 
 // ---------------------------------------------------------------------------

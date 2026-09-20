@@ -1,9 +1,14 @@
-/* 演出复盘前端：只读回放已结束场次。
+/* 演出复盘前端（只读）：只读回放已结束场次。
  *
- * 确定性重放模型：任何时刻的状态都不是播放过程中增量累积的，而是每次渲染都
- * 用 foldUntil(events, targetT) 从本场起点（session-start）按事件先后逐事件
- * 折叠到目标时刻得到。因此「拖动 / 点击跳转 / 正常顺序播放」到达同一时刻时，
- * 当前口令、确认 / 超时、替岗、修订及暂停状态必然完全一致。
+ * 本文件只保留复盘页的展示口径（事件标签 / 分类）与向后兼容的 Replay 门面；
+ * 场次、口令与确认轮次的折叠状态机全部在共享内核 public/replay-core.js 中：
+ *
+ *   - 复盘任意时刻重放：Replay.foldUntil(events, targetT) 从本场起点
+ *     （session-start）按事件日志行序逐事件折叠（同内核，同 compare / latency）；
+ *   - 场次对比（compare.js，Node 侧 require 同一文件）与确认延迟诊断
+ *     （public/latency.js）复用同一份轮次 / 暂停 / 替岗 / 修订模型；
+ *   - 消费者只负责筛选和展示，任何时刻的现场都由同一状态机重新折叠得到，
+ *     绝不增量累积，因此拖动 / 点击跳转 / 正常顺序播放到达同一时刻严格一致。
  *
  * 只读：本文件只发起 GET 请求拉取历史日志，没有 WebSocket、没有任何写操作，
  * 不可能影响当前演出状态或事件日志。
@@ -11,7 +16,15 @@
 'use strict';
 
 const Replay = (() => {
-  const DEFAULT_TIMEOUT_SEC = 30;
+  const {
+    DEFAULT_TIMEOUT_SEC,
+    foldEvent,
+    foldEvents,
+    foldUntil,
+    initialState,
+    effectiveTargets,
+    viewOf,
+  } = ReplayCore;
 
   const EVENT_LABELS = {
     'sequence-set': '序列已保存',
@@ -68,187 +81,7 @@ const Replay = (() => {
   function eventLabel(name) { return EVENT_LABELS[name] || name; }
   function categoryOf(name) { return CATEGORY_OF[name] || '其他'; }
 
-  // -------------------------------------------------------------------------
-  // 确定性折叠（reducer）：从本场起点开始逐事件应用，纯函数、无副作用。
-  // 播放到某时刻 = fold 全部 t <= targetT 的事件；跳转后重放也是同一条路径，
-  // 只是 targetT 不同，因此同一目标时刻的状态与顺序播放严格一致。
-  // -------------------------------------------------------------------------
-  function initialState() {
-    return {
-      phase: 'idle', // idle（未开始） | active（口令进行中） | between（口令已完成待推进） | done（全场结束）
-      results: {}, // seq -> 'active' | 'completed'
-      seq: null,
-      text: '',
-      originalText: '',
-      targets: [],
-      revision: 1,
-      reason: null,
-      attemptId: null,
-      confirmations: {}, // 岗位 -> { late }
-      timedOut: [],
-      substitutions: {}, // 原岗位 -> { substitute }
-      paused: false,
-      pauseReason: null,
-      attempts: [], // 当前口令已封存的只读历史轮次（撤回/完成）
-      roundStartIso: null, // 当前轮次开始时刻（封存历史轮次时展示）
-    };
-  }
-
-  function snapshotRound(s, endState, reason, ev) {
-    return {
-      endState,
-      revision: s.revision,
-      reason: reason || null,
-      text: s.text,
-      // renderAttempts 展示封存轮次起止时间：起点为当前轮次开始时刻，终点为本事件时刻
-      startedAt: s.roundStartIso || null,
-      endedAt: ev ? ev.ts : null,
-      confirmations: structuredClone(s.confirmations),
-      timedOut: [...s.timedOut],
-      substitutions: structuredClone(s.substitutions),
-    };
-  }
-
-  function resetRound(s) {
-    s.confirmations = {};
-    s.timedOut = [];
-    s.substitutions = {};
-    s.paused = false;
-    s.pauseReason = null;
-  }
-
-  function foldEvent(s, ev) {
-    const d = ev.detail || {};
-    switch (ev.event) {
-      case 'session-start':
-        s.phase = 'active';
-        break;
-
-      case 'cue-started': {
-        s.phase = 'active';
-        s.seq = Number(d.seq) || s.seq;
-        s.targets = Array.isArray(d.targets) ? d.targets.map(String) : [];
-        s.text = String(d.text || '');
-        s.originalText = s.text;
-        s.revision = 1;
-        s.reason = null;
-        s.attemptId = d.attemptId || null;
-        s.attempts = [];
-        resetRound(s);
-        s.roundStartIso = ev.ts;
-        s.results[s.seq] = 'active';
-        break;
-      }
-
-      // 撤回：先按旧轮次现场封存只读历史（在 cue-resent 清空本轮状态之前）
-      case 'cue-recalled': {
-        s.attempts.push(snapshotRound(s, 'recalled', d.reason, ev));
-        break;
-      }
-
-      // 修订版重发：同序号递增修订号、替换文本、清空本轮状态重新确认
-      case 'cue-resent': {
-        s.revision = Number(d.revision) || s.revision + 1;
-        s.text = String(d.text || s.text);
-        s.reason = d.reason || s.reason;
-        s.attemptId = d.attemptId || null;
-        resetRound(s);
-        s.roundStartIso = ev.ts;
-        break;
-      }
-
-      case 'cue-completed': {
-        s.attempts.push(snapshotRound(s, 'completed', null, ev));
-        if (s.seq != null) s.results[s.seq] = 'completed';
-        s.phase = 'between';
-        break;
-      }
-
-      case 'confirm':
-        if (d.position && !s.confirmations[d.position]) s.confirmations[d.position] = { late: false };
-        break;
-
-      case 'confirm-late':
-        if (d.position) {
-          s.confirmations[d.position] = { late: true };
-          s.timedOut = s.timedOut.filter((t) => t !== d.position);
-        }
-        break;
-
-      case 'cue-timeout':
-        // 与服务端一致：超时表只在首次定时器到期写入，不覆盖后续确认结果
-        if (s.timedOut.length === 0 && Array.isArray(d.missing)) s.timedOut = [...d.missing];
-        break;
-
-      case 'position-substituted': {
-        const from = String(d.from || '');
-        const to = String(d.to || '');
-        if (from && to && !s.substitutions[from]) {
-          s.substitutions[from] = { substitute: to };
-          s.timedOut = s.timedOut.map((t) => (t === from ? to : t));
-        }
-        break;
-      }
-
-      case 'cue-paused':
-        s.paused = true;
-        s.pauseReason = d.reason || '';
-        break;
-
-      case 'cue-resumed':
-        s.paused = false;
-        s.pauseReason = null;
-        break;
-
-      // 重复确认、暂停中确认被拒、旧轮次迟到消息、租约、草稿、上下线等事件
-      // 只存在于事件流/时间轴上，不改变当前口令现场
-      case 'sequence-finished':
-        s.phase = 'done';
-        s.paused = false;
-        s.pauseReason = null;
-        s.confirmations = {};
-        s.timedOut = [];
-        s.substitutions = {};
-        break;
-
-      default:
-        break;
-    }
-    return s;
-  }
-
-  // 从起点确定性重放到 targetT：逐事件应用所有偏移 <= targetT 的事件。
-  // events 已按日志行序排列（服务端保证追加顺序），同一毫秒内 cue-recalled
-  // 也必然先于 cue-resent 落盘，因此折叠结果与顺序播放逐帧到达时完全相同。
-  function foldUntil(events, targetT) {
-    const s = initialState();
-    for (const ev of events) {
-      if (ev.t > targetT) break;
-      foldEvent(s, ev);
-    }
-    return s;
-  }
-
-  // 当前口令有效目标（被替岗的原岗位由替补顶替）
-  function effectiveTargets(s) {
-    return s.targets.map((t) => (s.substitutions[t] ? s.substitutions[t].substitute : t));
-  }
-
-  // 折叠状态 → 可渲染视图（岗位状态分组）
-  function viewOf(s) {
-    const effective = effectiveTargets(s);
-    const confirmed = [];
-    const timedOut = [];
-    const pending = [];
-    for (const t of effective) {
-      const c = s.confirmations[t];
-      if (c) confirmed.push({ position: t, late: !!c.late });
-      else if (s.timedOut.includes(t)) timedOut.push(t);
-      else pending.push(t);
-    }
-    return { effective, confirmed, timedOut, pending };
-  }
-
+  // 事件涉及的岗位（筛选下拉口径，与服务端 replay.eventPositions 一致）
   function positionsOf(ev) {
     const d = (ev && ev.detail) || {};
     const set = new Set();
@@ -265,6 +98,7 @@ const Replay = (() => {
     categoryOf,
     initialState,
     foldEvent,
+    foldEvents,
     foldUntil,
     effectiveTargets,
     viewOf,
