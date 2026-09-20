@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>可验证复盘归档 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🧾 可验证复盘归档（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="compare.html">场次对比</a>
+      <a href="latency.html">确认延迟诊断</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main>
+    <!-- ① 下载归档 -->
+    <section class="card">
+      <h2>① 下载归档（已结束场次）</h2>
+      <div class="muted" style="margin-bottom:12px">
+        归档为单个 JSON 文件：格式版本、场次摘要、冻结序列、有效事件（保持日志行序）与逐行告警，
+        并附 <code>manifest</code>（事件数 + 事件哈希链最终摘要）。导出为纯只读 GET 请求，不写日志、不影响当前演出。
+      </div>
+      <div id="sessLoading" class="muted">正在读取已结束场次列表…</div>
+      <div class="row" id="downloadRow" style="display:none">
+        <select id="sessionSelect"></select>
+        <button id="downloadBtn" class="narrow">下载 JSON 归档</button>
+      </div>
+      <div id="downloadMeta" class="archive-meta" style="display:none"></div>
+    </section>
+
+    <!-- ② 本地校验归档 -->
+    <section class="card">
+      <h2>② 本地校验归档</h2>
+      <div class="muted" style="margin-bottom:12px">
+        选择本机归档文件（.json）进行校验：<b>文件仅在你的浏览器中解析，绝不上传到服务器</b>。
+        校验逐项重算并核对场次边界（session-start → sequence-finished）、事件数与哈希链摘要；
+        失败时定位首个事件索引或字段，成功时展示归档摘要。
+      </div>
+      <input type="file" id="fileInput" accept=".json,application/json">
+      <div id="verifyResult" style="margin-top:14px"></div>
+    </section>
+  </main>
+
+  <script src="archive.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：本脚本只发起 GET 请求，不创建 WebSocket，也没有任何写接口调用；
+    // 归档校验完全在本地进行（FileReader → CueArchive.verify），文件不上传。
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+
+    const sessLoading = document.getElementById('sessLoading');
+    const downloadRow = document.getElementById('downloadRow');
+    const sessionSelect = document.getElementById('sessionSelect');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const downloadMeta = document.getElementById('downloadMeta');
+    const fileInput = document.getElementById('fileInput');
+    const verifyResult = document.getElementById('verifyResult');
+
+    let sessions = [];
+
+    function refValue(s) { return `${s.fileId}/${s.runId}`; }
+    function selectedSession() {
+      return sessions.find((s) => refValue(s) === sessionSelect.value) || null;
+    }
+    function optionLabel(s) {
+      return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 条口令 ｜ ${s.eventCount} 事件 ｜ ${s.fileId.slice(0, 8)}… #${s.runId + 1}`;
+    }
+    function archiveFileName(s) {
+      return `cue-archive-${s.fileId}-run${s.runId + 1}.json`;
+    }
+
+    function renderDownloadMeta() {
+      const s = selectedSession();
+      if (!s) {
+        downloadMeta.style.display = 'none';
+        downloadMeta.innerHTML = '';
+        return;
+      }
+      downloadMeta.style.display = '';
+      downloadMeta.innerHTML = `
+        <span>口令 <b>${s.cueCount}</b> 条</span>
+        <span>事件 <b>${s.eventCount}</b> 条</span>
+        <span>时长 <b>${esc(fmtDuration(s.durationMs))}</b></span>
+        <span>确认时限 <b>${s.timeoutSec}s</b></span>
+        <span title="${esc(s.fileId)}">日志 <b>${esc(s.fileId.slice(0, 8))}…</b> 第 ${s.runId + 1} 段</span>`;
+    }
+
+    async function loadSessions() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessions = payload.sessions || [];
+      if (!sessions.length) {
+        sessLoading.innerHTML = '<span style="color:#f0c169">data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次，暂无可导出归档。</span>';
+        return;
+      }
+      sessLoading.style.display = 'none';
+      downloadRow.style.display = '';
+      sessionSelect.innerHTML = sessions.map((s) =>
+        `<option value="${esc(refValue(s))}">${esc(optionLabel(s))}</option>`).join('');
+      renderDownloadMeta();
+    }
+
+    async function downloadArchive() {
+      const s = selectedSession();
+      if (!s) return;
+      downloadBtn.disabled = true;
+      downloadBtn.textContent = '正在生成归档…';
+      try {
+        const resp = await fetch(`/api/archive/sessions/${encodeURIComponent(s.fileId)}/${encodeURIComponent(s.runId)}`);
+        const payload = await resp.json();
+        if (!resp.ok || payload.error) {
+          alert(`导出归档失败：${payload.error || resp.status}`);
+          return;
+        }
+        // 单个 JSON 归档包：本地生成 Blob 触发下载，不回传任何数据
+        const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = archiveFileName(s);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch {
+        alert('归档下载失败，请确认服务已启动');
+      } finally {
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = '下载 JSON 归档';
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 本地校验
+    // ---------------------------------------------------------------------
+    function renderVerifyFail(fileName, error) {
+      const loc = error.index != null
+        ? `首个问题位置：第 <b>${error.index + 1}</b> 个事件（索引 ${error.index}），字段 <code>${esc(error.field)}</code>`
+        : `首个问题字段：<code>${esc(error.field)}</code>`;
+      verifyResult.innerHTML = `
+        <div class="archive-result fail">
+          <div class="archive-result-head">❌ 校验失败：${esc(fileName)}</div>
+          <div class="archive-fail-msg">${esc(error.message)}</div>
+          <div class="archive-fail-loc">${loc}</div>
+        </div>`;
+    }
+
+    function renderVerifyOk(fileName, summary) {
+      const s = summary.session;
+      verifyResult.innerHTML = `
+        <div class="archive-result ok">
+          <div class="archive-result-head">✅ 校验通过：${esc(fileName)}</div>
+          <div class="archive-meta">
+            <span>格式 <b>${esc(summary.format)} v${summary.version}</b></span>
+            <span>口令 <b>${summary.cueCount}</b> 条</span>
+            <span>事件 <b>${summary.eventCount}</b> 条</span>
+            <span>告警 <b>${summary.warningCount}</b> 行</span>
+            <span>确认时限 <b>${s.timeoutSec}s</b></span>
+          </div>
+          <div class="archive-meta">
+            <span>场次 <b>${esc(fmtClock(s.startedAt))} → ${esc(fmtClock(s.finishedAt))}</b></span>
+            <span>时长 <b>${esc(fmtDuration(s.durationMs))}</b></span>
+            <span title="${esc(s.fileId)}">日志 <b>${esc(s.fileId.slice(0, 8))}…</b> 第 ${s.runId + 1} 段</span>
+          </div>
+          <div class="archive-digest" title="事件哈希链最终摘要（SHA-256）">
+            <span class="muted">最终摘要</span> <code>${esc(summary.digest)}</code>
+          </div>
+        </div>`;
+    }
+
+    async function verifyFile(file) {
+      let text;
+      try {
+        text = await file.text();
+      } catch {
+        renderVerifyFail(file.name, { message: '文件读取失败', field: '(file)' });
+        return;
+      }
+      let archive;
+      try {
+        archive = JSON.parse(text);
+      } catch (err) {
+        renderVerifyFail(file.name, { message: `文件不是合法 JSON：${err.message}`, field: '(json)' });
+        return;
+      }
+      try {
+        const result = await CueArchive.verify(archive);
+        if (result.ok) renderVerifyOk(file.name, result.summary);
+        else renderVerifyFail(file.name, result.error);
+      } catch (err) {
+        renderVerifyFail(file.name, { message: err.message || '校验过程出错', field: '(verify)' });
+      }
+    }
+
+    sessionSelect.addEventListener('change', renderDownloadMeta);
+    downloadBtn.addEventListener('click', downloadArchive);
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) verifyFile(file);
+      fileInput.value = ''; // 允许重复选择同一文件重新校验
+    });
+
+    loadSessions();
+  })();
+  </script>
+</body>
+</html>

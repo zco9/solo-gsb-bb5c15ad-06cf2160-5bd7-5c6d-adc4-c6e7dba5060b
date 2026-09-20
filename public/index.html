@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎭 舞台排练口令同步系统</h1>
+    <span id="conn">未连接</span>
+  </header>
+  <main>
+    <div id="versionBar"></div>
+    <div class="home-links">
+      <a href="director.html">
+        <b>导演端</b>
+        <span>创建演出序列：序号、口令内容、目标岗位与确认时限</span>
+      </a>
+      <a href="control.html">
+        <b>控制端</b>
+        <span>发出当前口令，监控各岗位确认状态，可指定临时替岗、撤回并纠正重发，全员确认后推进</span>
+      </a>
+      <a href="position.html">
+        <b>岗位端</b>
+        <span>仅目标岗位可确认当前口令，断线重连自动恢复状态</span>
+      </a>
+      <a href="replay.html">
+        <b>演出复盘</b>
+        <span>只读：列出已结束场次，重建可拖动口令时间轴，按事件类型 / 岗位筛选，1×/2×/4× 回放与任意跳转</span>
+      </a>
+      <a href="annotations.html">
+        <b>复盘批注簿</b>
+        <span>只读：圈定已结束场次的一段时间填写批注与标签（仅存本浏览器 IndexedDB），事件指纹锚点可重定位，支持按场次 / 标签 / 有效性筛选与 JSON 导入导出</span>
+      </a>
+      <a href="playlist.html">
+        <b>复盘播放清单</b>
+        <span>只读：从有效批注勾选区间并拖拽排序（清单仅存本浏览器 IndexedDB），按顺序连续回放并跨场次自动切换；虚拟时间轴拖动 / 播放 / 1×/2×/4× 映射回各场次原始时刻，播放前重定位并自动跳过失效或日志缺失条目</span>
+      </a>
+      <a href="compare.html">
+        <b>场次对比</b>
+        <span>只读：选择两个已结束场次，按规范化口令与目标岗位做序列对齐，生成新增 / 删除 / 匹配逐口令对照表</span>
+      </a>
+      <a href="latency.html">
+        <b>确认延迟诊断</b>
+        <span>只读：选择已结束场次，逐口令展示各目标岗位确认瀑布；按 attemptId 重建修订轮次、扣除暂停时长，替岗计入接管岗位，支持岗位 / 结果筛选并跳回复盘</span>
+      </a>
+      <a href="archive.html">
+        <b>可验证复盘归档</b>
+        <span>只读：下载已结束场次的 JSON 归档（含事件哈希链摘要），或纯本地上传归档逐项重算校验</span>
+      </a>
+    </div>
+    <div class="card" style="margin-top:20px">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const logEl = document.getElementById('log');
+    const versionBar = document.getElementById('versionBar');
+    CueClient.connect({
+      role: 'viewer',
+      onState(state) {
+        versionBar.innerHTML = CueClient.renderVersionBar(state);
+        logEl.innerHTML = state.log.length
+          ? CueClient.renderLog(state.log)
+          : '<span class="muted">暂无事件</span>';
+      },
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>复盘批注簿 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>📓 复盘批注簿（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="playlist.html">复盘播放清单</a>
+      <a href="compare.html">场次对比</a>
+      <a href="latency.html">确认延迟诊断</a>
+      <a href="archive.html">复盘归档</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main class="ann-main">
+    <section class="card">
+      <h2>说明</h2>
+      <div class="muted" style="line-height:1.8">
+        批注<b>只保存在本浏览器的 IndexedDB</b>（不上传、不调用任何写接口、不连接 WebSocket），用于圈定同一已结束场次中的一段时间并记录批注与标签。
+        区间首尾以<b>事件指纹</b>锚定（事件 canonical JSON 的 SHA-256 + 该指纹出现序号）；重新载入日志时自动重新定位，
+        <b>找不到指纹或终点顺序倒置则标为失效</b>，原文完整保留。支持 JSON 导入 / 导出：按批注 id 合并，内容一致自动去重，
+        同 id 内容不同则两份均保留并明确标记冲突。在 <a href="replay.html">演出复盘</a> 播放位置可直接圈定区间进入本页。
+      </div>
+    </section>
+
+    <!-- 新建批注（也承接复盘页「圈定区间后填写批注」入口） -->
+    <section class="card" id="createCard">
+      <h2 id="createTitle">① 新建批注</h2>
+      <div id="createPrefill" class="ann-prefill" style="display:none"></div>
+      <div class="ann-form">
+        <label class="ann-label">场次（仅已结束场次）</label>
+        <select id="createSession"></select>
+        <div class="ann-range-row">
+          <div>
+            <label class="ann-label">区间起点事件</label>
+            <select id="createStart" size="6"></select>
+          </div>
+          <div>
+            <label class="ann-label">区间终点事件</label>
+            <select id="createEnd" size="6"></select>
+          </div>
+        </div>
+        <label class="ann-label">批注内容</label>
+        <textarea id="createText" rows="3" placeholder="填写对这段区间的复盘批注…"></textarea>
+        <label class="ann-label">标签（逗号 / 顿号 / 空格分隔，自动去重）</label>
+        <input type="text" id="createTags" placeholder="如：灯光, 超时, 沟通问题">
+        <div class="row" style="margin-top:12px">
+          <button id="createBtn" class="narrow">保存批注</button>
+          <button id="createCancelBtn" class="secondary narrow" style="display:none">取消圈定</button>
+          <span id="createMsg" class="ann-msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 导入 / 导出 -->
+    <section class="card">
+      <h2>② JSON 导入 / 导出</h2>
+      <div class="row">
+        <button id="exportBtn" class="secondary narrow">导出全部批注（JSON）</button>
+        <button id="importBtn" class="secondary narrow">导入批注（JSON）…</button>
+        <input type="file" id="importFile" accept=".json,application/json" style="display:none">
+        <span class="muted">导入只在本机合并：同 id 内容一致去重；同 id 内容不同则两份均保留并标记冲突；文件绝不上传。</span>
+      </div>
+      <div id="ioMsg" class="ann-msg"></div>
+    </section>
+
+    <!-- 筛选 + 列表 -->
+    <section class="card">
+      <h2>③ 批注列表</h2>
+      <div class="ann-filters">
+        <label>场次</label>
+        <select id="filterSession"></select>
+        <label>标签</label>
+        <select id="filterTag"></select>
+        <label>有效性</label>
+        <select id="filterValid">
+          <option value="all">全部</option>
+          <option value="valid">仅有效</option>
+          <option value="invalid">仅失效</option>
+        </select>
+        <label class="ann-inline"><input type="checkbox" id="filterConflict"> 仅看冲突</label>
+        <span id="listCount" class="muted" style="flex:1;text-align:right"></span>
+      </div>
+      <div id="annList" class="ann-list"></div>
+    </section>
+
+    <!-- 复盘播放清单：从有效批注勾选区间、拖拽排序；清单只存 IndexedDB -->
+    <section class="card" id="playlistCard">
+      <h2>④ 复盘播放清单（仅本浏览器 IndexedDB）</h2>
+      <div class="muted" style="line-height:1.8">
+        从下方<b>有效批注</b>勾选区间加入清单，拖拽行（或用 ↑ / ↓）调整播放顺序。清单<b>只保存在本浏览器的 IndexedDB</b>
+        （独立库 <code>cue-playlists</code>，不上传、不连接 WebSocket）。
+        打开播放页后按清单顺序<b>连续回放并自动跨场次切换</b>：各段拼接为一条虚拟时间轴，拖动、播放与 1×/2×/4× 倍速
+        都按累计区间时长映射回对应场次的原始时刻，恰好落在边界时进入后一段。播放前会重新定位每条批注，
+        <b>失效或日志缺失的条目自动跳过并集中列明原因</b>；重叠区间按清单顺序分别播放，绝不合并。
+      </div>
+      <div class="pl-layout">
+        <div class="pl-col">
+          <div class="pl-col-head"><span><b>候选区间（有效批注）</b></span><span id="plCandCount" class="muted"></span></div>
+          <div id="plCandidates" class="pl-cand-list"></div>
+        </div>
+        <div class="pl-col">
+          <div class="pl-col-head"><span><b>播放清单（拖拽排序）</b></span><span id="plCount" class="muted"></span></div>
+          <div id="plItems" class="pl-items"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="plOpenBtn" class="narrow">▶ 打开播放页</button>
+            <button id="plClearBtn" class="secondary narrow">清空清单</button>
+            <a class="narrow" href="playlist.html" id="plOpenLink" style="display:none"></a>
+            <span id="plMsg" class="ann-msg"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="replay.js"></script>
+  <script src="annotations.js"></script>
+  <script src="playlist.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：本脚本只发起复盘只读 GET 请求，不创建 WebSocket；
+    // 批注写入仅发生在浏览器 IndexedDB；导入文件仅本地解析，绝不上传。
+    const A = CueAnnotations;
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+
+    const createSession = document.getElementById('createSession');
+    const createStart = document.getElementById('createStart');
+    const createEnd = document.getElementById('createEnd');
+    const createText = document.getElementById('createText');
+    const createTags = document.getElementById('createTags');
+    const createBtn = document.getElementById('createBtn');
+    const createCancelBtn = document.getElementById('createCancelBtn');
+    const createMsg = document.getElementById('createMsg');
+    const createPrefill = document.getElementById('createPrefill');
+    const exportBtn = document.getElementById('exportBtn');
+    const importBtn = document.getElementById('importBtn');
+    const importFile = document.getElementById('importFile');
+    const ioMsg = document.getElementById('ioMsg');
+    const filterSession = document.getElementById('filterSession');
+    const filterTag = document.getElementById('filterTag');
+    const filterValid = document.getElementById('filterValid');
+    const filterConflict = document.getElementById('filterConflict');
+    const listCount = document.getElementById('listCount');
+    const annList = document.getElementById('annList');
+
+    const params = new URLSearchParams(location.search);
+    const prefill = {
+      fileId: params.get('file'),
+      runId: params.get('run'),
+      startIdx: Number(params.get('si')),
+      endIdx: Number(params.get('ei')),
+    };
+    // 复盘页「打开复盘批注簿」携带的本场筛选值（fileId/runId）
+    const preselectSession = params.get('fsel');
+
+    let sessions = []; // 复盘只读接口返回的已结束场次摘要
+    // sessionCache: key "file/run" -> { ok, events?, reason? }，批量重定位时复用
+    const sessionCache = new Map();
+    // 每条批注的当前重定位结果：id -> { valid, reason, startIndex, endIndex, startT, endT }
+    let resolved = new Map();
+    let records = [];
+
+    // ---------------------------------------------------------------------
+    // 展示工具
+    // ---------------------------------------------------------------------
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      if (!Number.isFinite(d.getTime())) return '—';
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtT(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sign = ms < 0 ? '-' : '';
+      ms = Math.abs(ms);
+      const m = Math.floor(ms / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      const tenth = Math.floor((ms % 1000) / 100);
+      return `${sign}${m}:${String(s).padStart(2, '0')}.${tenth}`;
+    }
+    function refKey(fileId, runId) { return `${fileId}/${runId}`; }
+    function sessionLabel(ref) {
+      const s = sessions.find((x) => x.fileId === ref.fileId && Number(x.runId) === Number(ref.runId));
+      if (s) return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 口令 ｜ ${ref.fileId.slice(0, 8)}… #${Number(ref.runId) + 1}`;
+      return `（场次不在当前日志列表）${ref.fileId.slice(0, 8)}… #${Number(ref.runId) + 1}`;
+    }
+    function eventOptionLabel(ev) {
+      const d = ev.detail || {};
+      let detail = '';
+      if (d.seq != null) detail += ` #${d.seq}`;
+      if (d.text) detail += ` ${d.text}`;
+      if (d.position) detail += ` ${d.position}`;
+      return `+${fmtT(ev.t)} ${Replay.eventLabel(ev.event)}${detail}`;
+    }
+
+    // ---------------------------------------------------------------------
+    // 拉取场次（只读 GET，失败按失效处理，不影响其他批注）
+    // ---------------------------------------------------------------------
+    async function loadSession(fileId, runId) {
+      const key = refKey(fileId, runId);
+      if (sessionCache.has(key)) return sessionCache.get(key);
+      let entry;
+      try {
+        const resp = await fetch(`/api/replay/sessions/${encodeURIComponent(fileId)}/${encodeURIComponent(runId)}`);
+        if (resp.status === 404 || resp.status === 400) {
+          entry = { ok: false, reason: '场次日志找不到（文件或段落不存在，可能已删除）' };
+        } else {
+          const payload = await resp.json();
+          if (payload.error) entry = { ok: false, reason: `场次读取失败：${payload.error}` };
+          else entry = { ok: true, events: payload.events };
+        }
+      } catch {
+        entry = { ok: false, reason: '场次日志读取失败（服务不可用）' };
+      }
+      sessionCache.set(key, entry);
+      return entry;
+    }
+
+    // ---------------------------------------------------------------------
+    // 重定位全部批注
+    // ---------------------------------------------------------------------
+    async function relocalizeAll() {
+      resolved = new Map();
+      const needKeys = new Set(records.map((r) => refKey(r.sessionRef.fileId, r.sessionRef.runId)));
+      const tables = new Map();
+      for (const key of needKeys) {
+        const [fileId, runIdStr] = key.split('/');
+        const loaded = await loadSession(fileId, runIdStr);
+        if (loaded.ok) tables.set(key, await A.buildOccurrenceTable(loaded.events));
+      }
+      for (const r of records) {
+        const key = refKey(r.sessionRef.fileId, r.sessionRef.runId);
+        const loaded = sessionCache.get(key);
+        if (!loaded || !loaded.ok) {
+          resolved.set(r.id, { valid: false, reason: loaded ? loaded.reason : '场次日志找不到' });
+          continue;
+        }
+        const out = A.relocalize(r, tables.get(key));
+        if (out.valid) {
+          const events = loaded.events;
+          resolved.set(r.id, {
+            valid: true,
+            startIndex: out.startIndex,
+            endIndex: out.endIndex,
+            startT: events[out.startIndex].t,
+            endT: events[out.endIndex].t,
+          });
+        } else {
+          resolved.set(r.id, { valid: false, reason: out.reason });
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 列表渲染（按场次 / 标签 / 有效性筛选）
+    // ---------------------------------------------------------------------
+    function renderList() {
+      const sessionVal = filterSession.value;
+      const tagVal = filterTag.value;
+      const validVal = filterValid.value;
+      const onlyConflict = filterConflict.checked;
+
+      const shown = records.filter((r) => {
+        if (sessionVal !== 'all' && refKey(r.sessionRef.fileId, r.sessionRef.runId) !== sessionVal) return false;
+        if (tagVal !== 'all' && !(r.tags || []).includes(tagVal)) return false;
+        const res = resolved.get(r.id);
+        const valid = !!(res && res.valid);
+        if (validVal === 'valid' && !valid) return false;
+        if (validVal === 'invalid' && valid) return false;
+        if (onlyConflict && !r.conflict) return false;
+        return true;
+      });
+
+      const validCount = [...resolved.values()].filter((x) => x.valid).length;
+      const invalidCount = resolved.size - validCount;
+      const conflictCount = records.filter((r) => r.conflict).length;
+      listCount.textContent = `共 ${records.length} 条（有效 ${validCount} / 失效 ${invalidCount}${conflictCount ? ` / 冲突 ${conflictCount}` : ''}），当前显示 ${shown.length} 条`;
+
+      if (!shown.length) {
+        annList.innerHTML = '<div class="muted ann-empty">没有符合筛选条件的批注。可在上方新建，或在演出复盘页从播放位置圈定区间。</div>';
+        return;
+      }
+
+      annList.innerHTML = shown
+        .slice()
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .map((r) => renderRow(r)).join('');
+
+      annList.querySelectorAll('[data-del]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('确定从本浏览器删除这条批注？原文与锚点都会被移除。')) return;
+          await A.remove(btn.dataset.del);
+          await refresh();
+        });
+      });
+      // 行头部复选框勾选态随列表重绘同步（清单内容在 renderPlaylistCard 中统一刷新）
+      if (document.getElementById('playlistCard')) renderPlaylistCard();
+    }
+
+    function renderRow(r) {
+      const res = resolved.get(r.id) || { valid: false, reason: '尚未重定位' };
+      const startT = res.valid ? res.startT : r.startT;
+      const endT = res.valid ? res.endT : r.endT;
+      const badges = [];
+      if (r.conflict) badges.push('<span class="ann-badge conflict">⚠️ 冲突</span>');
+      badges.push(res.valid
+        ? '<span class="ann-badge valid">✔ 有效</span>'
+        : '<span class="ann-badge invalid">✖ 失效（原文保留）</span>');
+      const tagHtml = (r.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
+      const conflictLine = r.conflict
+        ? `<div class="ann-conflict-line">同 id 内容不同，已与冲突组 <code>${esc(r.conflictGroup || r.id)}</code> 中的另一份同时保留；请人工核对后删除多余项。</div>` : '';
+      const invalidLine = !res.valid
+        ? `<div class="ann-invalid-line">失效原因：${esc(res.reason)}（下方区间与事件为圈定时保存的原文）</div>` : '';
+      // 有效批注：点击跳回复盘区间起点；失效批注不可跳转
+      const head = res.valid
+        ? `<label class="ann-row-pl inline-check" title="加入复盘播放清单"><input type="checkbox" data-row-pl="${esc(r.id)}"></label>
+           <a class="ann-jump" href="replay.html?file=${encodeURIComponent(r.sessionRef.fileId)}&run=${encodeURIComponent(r.sessionRef.runId)}&t=${encodeURIComponent(startT)}">↗ 跳回复盘区间起点 +${fmtT(startT)}</a>`
+        : '<span class="ann-row-pl inline-check is-off" title="失效批注不能加入播放清单"><input type="checkbox" disabled></span><span class="ann-jump disabled">↚ 失效批注不可跳转</span>';
+      return `<div class="ann-row ${res.valid ? '' : 'is-invalid'}">
+        <div class="ann-row-head">
+          ${badges.join(' ')}
+          <span class="ann-session" title="${esc(refKey(r.sessionRef.fileId, r.sessionRef.runId))}">${esc(sessionLabel(r.sessionRef))}</span>
+          ${head}
+          <button class="mini danger ann-del" data-del="${esc(r.id)}">删除</button>
+        </div>
+        <div class="ann-range">区间：+${fmtT(startT)} → +${fmtT(endT)}</div>
+        ${conflictLine}${invalidLine}
+        <div class="ann-text">${esc(r.text) || '<span class="muted">（无批注文本）</span>'}</div>
+        <div class="ann-tags">${tagHtml}</div>
+        <div class="ann-foot muted">
+          <span title="${esc(r.id)}">id <code>${esc(r.id.slice(0, 13))}…</code></span>
+          <span>创建于 ${fmtClock(r.createdAt)}</span>
+          ${renderAnchorEvent('起', r.startEvent)}${renderAnchorEvent('止', r.endEvent)}
+        </div>
+      </div>`;
+    }
+
+    function renderAnchorEvent(label, ev) {
+      if (!ev) return '';
+      return `<span class="ann-anchor-event" title="${esc(A.canonicalJson(ev))}">${label}：${fmtClock(ev.ts)} ${esc(Replay.eventLabel(ev.event))}</span>`;
+    }
+
+    function populateFilterTag() {
+      const tags = new Set();
+      records.forEach((r) => (r.tags || []).forEach((t) => tags.add(t)));
+      const prev = filterTag.value;
+      filterTag.innerHTML = '<option value="all">全部标签</option>' +
+        [...tags].sort().map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+      filterTag.value = [...tags].includes(prev) ? prev : 'all';
+    }
+
+    function populateFilterSession() {
+      const refs = new Map();
+      records.forEach((r) => refs.set(refKey(r.sessionRef.fileId, r.sessionRef.runId), r.sessionRef));
+      const prev = filterSession.value;
+      const options = ['<option value="all">全部场次</option>'];
+      for (const s of sessions) {
+        const key = refKey(s.fileId, s.runId);
+        options.push(`<option value="${esc(key)}">${esc(sessionLabel(s))}</option>`);
+      }
+      // 批注引用了已不在列表中的场次（日志被删除）也保留筛选项
+      for (const [key, ref] of refs) {
+        if (!sessions.some((s) => refKey(s.fileId, s.runId) === key)) {
+          options.push(`<option value="${esc(key)}">${esc(sessionLabel(ref))}</option>`);
+        }
+      }
+      filterSession.innerHTML = options.join('');
+      const allVals = [...filterSession.options].map((o) => o.value);
+      filterSession.value = allVals.includes(prev) ? prev : 'all';
+    }
+
+    // ---------------------------------------------------------------------
+    // 新建表单
+    // ---------------------------------------------------------------------
+    function populateCreateSessions() {
+      createSession.innerHTML = sessions.map((s) =>
+        `<option value="${esc(refKey(s.fileId, s.runId))}">${esc(sessionLabel(s))}</option>`).join('');
+    }
+
+    async function populateEventSelects(fileId, runId) {
+      createStart.innerHTML = '';
+      createEnd.innerHTML = '';
+      if (!fileId || !Number.isInteger(runId)) return null;
+      const loaded = await loadSession(fileId, runId);
+      if (!loaded.ok) {
+        createMsg.textContent = loaded.reason;
+        createMsg.className = 'ann-msg err';
+        return null;
+      }
+      createStart.innerHTML = loaded.events.map((ev, i) =>
+        `<option value="${i}">${esc(eventOptionLabel(ev))}</option>`).join('');
+      createEnd.innerHTML = loaded.events.map((ev, i) =>
+        `<option value="${i}">${esc(eventOptionLabel(ev))}</option>`).join('');
+      return loaded;
+    }
+
+    async function handleCreateSessionChange(selectIdx) {
+      const [fileId, runIdStr] = (createSession.value || '/').split('/');
+      const loaded = await populateEventSelects(fileId, Number(runIdStr));
+      if (!loaded) return;
+      if (selectIdx != null) {
+        const max = loaded.events.length - 1;
+        createStart.value = String(Math.max(0, Math.min(max, selectIdx)));
+        createEnd.value = String(Math.max(0, Math.min(max, selectIdx)));
+      }
+    }
+
+    async function initCreate() {
+      populateCreateSessions();
+      if (!sessions.length) return;
+      if (prefill.fileId && prefill.runId !== null &&
+          Number.isInteger(prefill.startIdx) && Number.isInteger(prefill.endIdx)) {
+        const key = refKey(prefill.fileId, prefill.runId);
+        if ([...createSession.options].some((o) => o.value === key)) {
+          createSession.value = key;
+          const loaded = await populateEventSelects(prefill.fileId, Number(prefill.runId));
+          if (loaded) {
+            const max = loaded.events.length - 1;
+            const si = Math.max(0, Math.min(max, prefill.startIdx));
+            const ei = Math.max(0, Math.min(max, prefill.endIdx));
+            createStart.value = String(si);
+            createEnd.value = String(Math.max(si, ei));
+            createPrefill.style.display = '';
+            createPrefill.innerHTML = `📍 来自复盘当前播放位置的圈定：场次 <b>${esc(sessionLabel({ fileId: prefill.fileId, runId: Number(prefill.runId) }))}</b>，` +
+              `区间 <b>+${fmtT(loaded.events[si].t)} → +${fmtT(loaded.events[Math.max(si, ei)].t)}</b>，可在下方调整首尾事件后填写批注。`;
+            createCancelBtn.style.display = '';
+            createText.focus();
+          }
+        }
+      } else {
+        await handleCreateSessionChange();
+      }
+    }
+
+    createSession.addEventListener('change', () => handleCreateSessionChange());
+    createCancelBtn.addEventListener('click', () => {
+      location.href = `replay.html?file=${encodeURIComponent(prefill.fileId)}&run=${encodeURIComponent(prefill.runId)}`;
+    });
+
+    createBtn.addEventListener('click', async () => {
+      createMsg.textContent = '';
+      const [fileId, runIdStr] = (createSession.value || '').split('/');
+      const runId = Number(runIdStr);
+      if (!fileId || !Number.isInteger(runId)) {
+        createMsg.textContent = '请选择场次'; createMsg.className = 'ann-msg err'; return;
+      }
+      const loaded = await loadSession(fileId, runId);
+      if (!loaded.ok) { createMsg.textContent = loaded.reason; createMsg.className = 'ann-msg err'; return; }
+      const si = Number(createStart.value);
+      const ei = Number(createEnd.value);
+      if (!Number.isInteger(si) || !Number.isInteger(ei) || si < 0 || ei < 0 ||
+          si >= loaded.events.length || ei >= loaded.events.length) {
+        createMsg.textContent = '请选择区间首尾事件'; createMsg.className = 'ann-msg err'; return;
+      }
+      if (ei < si) {
+        createMsg.textContent = '终点事件不能在起点事件之前'; createMsg.className = 'ann-msg err'; return;
+      }
+      const text = createText.value.trim();
+      if (!text) {
+        createMsg.textContent = '请填写批注内容'; createMsg.className = 'ann-msg err'; return;
+      }
+      const summary = sessions.find((s) => s.fileId === fileId && Number(s.runId) === runId);
+      const ann = await A.buildAnnotation({
+        events: loaded.events,
+        sessionRef: {
+          fileId, runId,
+          startedAt: summary ? summary.startedAt : null,
+          finishedAt: summary ? summary.finishedAt : null,
+        },
+        startIndex: si,
+        endIndex: ei,
+        text,
+        tags: A.normalizeTags(createTags.value),
+      });
+      await A.put(ann);
+      createText.value = '';
+      createTags.value = '';
+      createMsg.textContent = '批注已保存到本浏览器 IndexedDB';
+      createMsg.className = 'ann-msg ok';
+      // 保存后留在本页并刷新列表（自动选中该场筛选）
+      await refresh();
+      filterSession.value = refKey(fileId, runId);
+      renderList();
+    });
+
+    // ---------------------------------------------------------------------
+    // 导入 / 导出
+    // ---------------------------------------------------------------------
+    exportBtn.addEventListener('click', () => {
+      const payload = A.buildExportPayload(records);
+      const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cue-annotations-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      ioMsg.textContent = `已导出 ${records.length} 条批注（本地文件，未上传）`;
+      ioMsg.className = 'ann-msg ok';
+    });
+
+    importBtn.addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', async () => {
+      const file = importFile.files && importFile.files[0];
+      importFile.value = '';
+      if (!file) return;
+      let obj;
+      try {
+        obj = JSON.parse(await file.text());
+      } catch (err) {
+        ioMsg.textContent = `导入失败：文件不是合法 JSON（${err.message}）`;
+        ioMsg.className = 'ann-msg err';
+        return;
+      }
+      const parsed = A.parseImportPayload(obj);
+      if (!parsed.ok) { ioMsg.textContent = `导入失败：${parsed.error}`; ioMsg.className = 'ann-msg err'; return; }
+      const existing = await A.getAll();
+      const { records: merged, stats } = A.mergeAnnotations(existing, parsed.annotations);
+      await A.putAll(merged);
+      ioMsg.innerHTML = `导入完成：新增 <b>${stats.added}</b> 条，内容一致去重 <b>${stats.duplicated}</b> 条，` +
+        `同 id 内容不同的冲突 <b>${stats.conflicts}</b> 组（两份均保留并标记冲突）` +
+        (parsed.invalid ? `，跳过无法识别记录 <b>${parsed.invalid}</b> 条` : '');
+      ioMsg.className = stats.conflicts ? 'ann-msg warn' : 'ann-msg ok';
+      await refresh();
+    });
+
+    [filterSession, filterTag, filterValid].forEach((el) => el.addEventListener('change', renderList));
+    filterConflict.addEventListener('change', renderList);
+
+    // ---------------------------------------------------------------------
+    // 复盘播放清单：从有效批注勾选区间 + 拖拽排序；清单只存 IndexedDB。
+    // 批注行头部复选框与候选区复选框操作的是同一份清单文档。
+    // ---------------------------------------------------------------------
+    const plCandidates = document.getElementById('plCandidates');
+    const plItems = document.getElementById('plItems');
+    const plCount = document.getElementById('plCount');
+    const plCandCount = document.getElementById('plCandCount');
+    const plOpenBtn = document.getElementById('plOpenBtn');
+    const plClearBtn = document.getElementById('plClearBtn');
+    const plMsg = document.getElementById('plMsg');
+
+    let playlist = CuePlaylist.emptyDoc();
+    const plSet = () => new Set(playlist.entries.map((e) => e.id));
+    let dragPlId = null;
+
+    function plFlash(text, cls) {
+      plMsg.textContent = text || '';
+      plMsg.className = `ann-msg ${cls || ''}`;
+      if (text) setTimeout(() => { if (plMsg.textContent === text) { plMsg.textContent = ''; plMsg.className = 'ann-msg'; } }, 2500);
+    }
+
+    // 候选区一行：复选框 + 区间信息（有效批注，按场次 / 起始时刻排序）
+    function renderPlCandidate(r) {
+      const res = resolved.get(r.id);
+      const inList = plSet().has(r.id);
+      return `<label class="pl-cand-row${inList ? ' in' : ''}">
+        <input type="checkbox" data-pl-add="${esc(r.id)}" ${inList ? 'checked' : ''}>
+        <span class="pl-cand-session" title="${esc(refKey(r.sessionRef.fileId, r.sessionRef.runId))}">${esc(sessionLabel(r.sessionRef))}</span>
+        <span class="pl-cand-range">+${fmtT(res.startT)} → +${fmtT(res.endT)}</span>
+        <span class="pl-cand-text">${esc(r.text) || '<span class="muted">（无批注文本）</span>'}</span>
+      </label>`;
+    }
+
+    // 清单区一行：拖拽把手 + 序号 + 区间信息 + 移除 / 上下移按钮
+    function renderPlItem(entry, i) {
+      const r = records.find((x) => x.id === entry.id);
+      const res = r && resolved.get(r.id);
+      const valid = !!(res && res.valid);
+      const body = valid
+        ? `<span class="pl-item-session" title="${esc(refKey(r.sessionRef.fileId, r.sessionRef.runId))}">${esc(sessionLabel(r.sessionRef))}</span>
+           <span class="pl-cand-range">+${fmtT(res.startT)} → +${fmtT(res.endT)}</span>
+           <span class="pl-cand-text">${esc(r.text) || '<span class="muted">（无批注文本）</span>'}</span>`
+        : `<span class="pl-item-missing">⚠ 批注已不在有效批注列表（播放前将自动跳过并说明原因）</span>`;
+      return `<div class="pl-item-row${valid ? '' : ' is-missing'}" draggable="true" data-pl-id="${esc(entry.id)}">
+        <span class="pl-grip" title="按住拖拽排序">⠿</span>
+        <span class="pl-idx">${i + 1}</span>
+        ${body}
+        <span class="pl-item-ops">
+          <button type="button" class="mini secondary" data-pl-up="${esc(entry.id)}" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="mini secondary" data-pl-down="${esc(entry.id)}" ${i === playlist.entries.length - 1 ? 'disabled' : ''}>↓</button>
+          <button type="button" class="mini danger" data-pl-rm="${esc(entry.id)}">移除</button>
+        </span>
+      </div>`;
+    }
+
+    function renderPlaylistCard() {
+      const validRecords = records
+        .filter((r) => { const res = resolved.get(r.id); return res && res.valid; })
+        .sort((a, b) => {
+          const ka = `${refKey(a.sessionRef.fileId, a.sessionRef.runId)}/${resolved.get(a.id).startIndex}`;
+          const kb = `${refKey(b.sessionRef.fileId, b.sessionRef.runId)}/${resolved.get(b.id).startIndex}`;
+          return ka < kb ? -1 : ka > kb ? 1 : 0;
+        });
+      plCandCount.textContent = `${validRecords.length} 条可选`;
+      plCandidates.innerHTML = validRecords.length
+        ? validRecords.map(renderPlCandidate).join('')
+        : '<div class="muted ann-empty">尚无有效批注（失效批注不能加入清单）。</div>';
+
+      plCount.textContent = `${playlist.entries.length} 段`;
+      plItems.innerHTML = playlist.entries.length
+        ? playlist.entries.map(renderPlItem).join('')
+        : '<div class="muted ann-empty">清单为空：勾选左侧有效批注即可加入。</div>';
+      plOpenBtn.disabled = playlist.entries.length === 0;
+
+      // 批注行头部的复选框同步勾选态
+      annList.querySelectorAll('[data-row-pl]').forEach((cb) => {
+        cb.checked = plSet().has(cb.dataset.rowPl);
+      });
+    }
+
+    async function refreshPlaylist() {
+      try {
+        playlist = await CuePlaylist.get();
+      } catch {
+        playlist = CuePlaylist.emptyDoc();
+        plFlash('IndexedDB 不可用，清单无法读取', 'err');
+      }
+      renderPlaylistCard();
+    }
+
+    async function togglePlEntry(id, on) {
+      try {
+        if (on) await CuePlaylist.addIds([id]);
+        else await CuePlaylist.removeId(id);
+        playlist = await CuePlaylist.get();
+        renderPlaylistCard();
+        plFlash(on ? '已加入播放清单' : '已从播放清单移除', 'ok');
+      } catch {
+        plFlash('清单写入失败（IndexedDB 不可用）', 'err');
+      }
+    }
+
+    // 候选区复选框
+    plCandidates.addEventListener('change', (e) => {
+      const id = e.target.dataset && e.target.dataset.plAdd;
+      if (id) togglePlEntry(id, e.target.checked);
+    });
+    // 批注列表行头部复选框
+    annList.addEventListener('change', (e) => {
+      const id = e.target.dataset && e.target.dataset.rowPl;
+      if (id) togglePlEntry(id, e.target.checked);
+    });
+
+    // 清单区：移除 / 上移 / 下移
+    async function plMove(id, delta) {
+      const ids = playlist.entries.map((x) => x.id);
+      const i = ids.indexOf(id);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      playlist = await CuePlaylist.reorder(ids);
+      renderPlaylistCard();
+    }
+    plItems.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-pl-rm],[data-pl-up],[data-pl-down]');
+      if (!btn) return;
+      if (btn.dataset.plRm) togglePlEntry(btn.dataset.plRm, false);
+      else if (btn.dataset.plUp) plMove(btn.dataset.plUp, -1);
+      else if (btn.dataset.plDown) plMove(btn.dataset.plDown, 1);
+    });
+
+    // 拖拽排序（HTML5 DnD）
+    plItems.addEventListener('dragstart', (e) => {
+      const row = e.target.closest('.pl-item-row');
+      if (!row) return;
+      dragPlId = row.dataset.plId;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', dragPlId); } catch { /* 部分浏览器限制 */ }
+    });
+    plItems.addEventListener('dragend', () => {
+      plItems.querySelectorAll('.pl-item-row').forEach((el) => el.classList.remove('dragging', 'drop-before', 'drop-after'));
+      dragPlId = null;
+    });
+    plItems.addEventListener('dragover', (e) => {
+      const row = e.target.closest('.pl-item-row');
+      if (!row || !dragPlId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = row.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      row.classList.toggle('drop-before', before);
+      row.classList.toggle('drop-after', !before);
+    });
+    plItems.addEventListener('dragleave', (e) => {
+      const row = e.target.closest('.pl-item-row');
+      if (row && !row.contains(e.relatedTarget)) row.classList.remove('drop-before', 'drop-after');
+    });
+    plItems.addEventListener('drop', async (e) => {
+      const row = e.target.closest('.pl-item-row');
+      if (!row || !dragPlId) return;
+      e.preventDefault();
+      const targetId = row.dataset.plId;
+      const before = e.clientY < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2;
+      const ids = playlist.entries.map((x) => x.id);
+      const from = ids.indexOf(dragPlId);
+      if (from < 0) return;
+      ids.splice(from, 1);
+      let to = ids.indexOf(targetId);
+      if (to < 0) to = ids.length;
+      if (!before) to += 1;
+      ids.splice(Math.min(to, ids.length), 0, dragPlId);
+      try {
+        playlist = await CuePlaylist.reorder(ids);
+        renderPlaylistCard();
+        plFlash('清单顺序已保存', 'ok');
+      } catch {
+        plFlash('清单写入失败（IndexedDB 不可用）', 'err');
+      }
+    });
+
+    plOpenBtn.addEventListener('click', () => { location.href = 'playlist.html'; });
+    plClearBtn.addEventListener('click', async () => {
+      if (!playlist.entries.length) return;
+      if (!confirm(`确定清空播放清单（${playlist.entries.length} 段）？批注本身不会被删除。`)) return;
+      try {
+        await CuePlaylist.clear();
+        playlist = await CuePlaylist.get();
+        renderPlaylistCard();
+        plFlash('清单已清空', 'ok');
+      } catch {
+        plFlash('清单写入失败（IndexedDB 不可用）', 'err');
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // 初始化
+    // ---------------------------------------------------------------------
+    async function refresh() {
+      records = await A.getAll();
+      await relocalizeAll();
+      populateFilterSession();
+      populateFilterTag();
+      renderList();
+    }
+
+    async function init() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        annList.innerHTML = '<div class="muted">场次列表加载失败，请确认服务已启动（批注仍可在本地管理，但暂时无法重定位）。</div>';
+      }
+      sessions = (payload && payload.sessions) || [];
+      await initCreate();
+      await refresh();
+      await refreshPlaylist();
+      // 从复盘页「打开复盘批注簿」进入：默认只看该场
+      if (preselectSession) {
+        const vals = [...filterSession.options].map((o) => o.value);
+        if (vals.includes(preselectSession)) {
+          filterSession.value = preselectSession;
+          renderList();
+        }
+      }
+    }
+
+    init();
+  })();
+  </script>
+</body>
+</html>

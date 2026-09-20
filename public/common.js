@@ -1,0 +1,182 @@
+/* 公共前端逻辑：带自动重连的 WebSocket 封装。
+ * clientId 存于 localStorage，断线重连后服务端以下发的全量状态快照恢复页面。 */
+'use strict';
+
+const CueClient = (() => {
+  function getClientId() {
+    let id = localStorage.getItem('cueClientId');
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem('cueClientId', id);
+    }
+    return id;
+  }
+
+  /**
+   * @param {object} opts
+   * @param {string} opts.role - 'director' | 'control' | 'position'
+   * @param {() => (string|null)} [opts.getPosition] - 岗位端返回岗位名
+   * @param {(state: object) => void} opts.onState
+   * @param {(message: string) => void} [opts.onError]
+   * @param {(connected: boolean) => void} [opts.onConnChange]
+   */
+  function connect(opts) {
+    let ws = null;
+    let closed = false;
+
+    function hello() {
+      const payload = { type: 'hello', role: opts.role, clientId: getClientId() };
+      if (opts.role === 'position' && opts.getPosition) {
+        payload.position = opts.getPosition();
+      }
+      send(payload);
+    }
+
+    function open() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => {
+        if (opts.onConnChange) opts.onConnChange(true);
+        hello();
+      };
+      ws.onmessage = (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch { return; }
+        if (data.type === 'state') opts.onState(data.state);
+        else if (data.type === 'error' && opts.onError) opts.onError(data.message);
+        else if (opts.onMessage) opts.onMessage(data); // 租约授予/续期等定向消息
+      };
+      ws.onclose = () => {
+        if (opts.onConnChange) opts.onConnChange(false);
+        if (!closed) setTimeout(open, 1000); // 断线自动重连
+      };
+      ws.onerror = () => ws.close();
+    }
+
+    function send(payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+        return true;
+      }
+      return false;
+    }
+
+    open();
+    return { send, rehello: hello, close: () => { closed = true; ws && ws.close(); } };
+  }
+
+  function fmtTime(isoOrMs) {
+    const d = new Date(isoOrMs);
+    return d.toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  const EVENT_LABELS = {
+    'sequence-set': '序列已保存',
+    'session-start': '演出开始',
+    'cue-started': '发出口令',
+    'cue-completed': '口令完成',
+    'cue-timeout': '确认超时',
+    'cue-recalled': '撤回并纠正重发',
+    'cue-resent': '修订版重新发出',
+    'cue-paused': '口令暂停',
+    'cue-resumed': '口令恢复',
+    'paused-confirm-rejected': '暂停中确认被拒',
+    'stale-confirm-ignored': '旧轮次确认被拒',
+    'stale-timeout-ignored': '旧轮次定时器被拒',
+    'stale-substitute-ignored': '旧轮次替岗被拒',
+    'confirm': '岗位确认',
+    'confirm-late': '迟到确认',
+    'confirm-duplicate': '重复确认',
+    'position-substituted': '临时替岗',
+    'lease-acquired': '指挥权租约授予',
+    'lease-acquire-denied': '租约申请被拒',
+    'lease-released': '指挥权释放',
+    'lease-expired': '租约超期自动释放',
+    'lease-op-denied': '越权操作被拒',
+    'stale-lease-heartbeat-ignored': '旧租约心跳被拒',
+    'sequence-finished': '全部口令完成',
+    'session-reset': '场次重置',
+    'draft-created': '下一场草稿已创建',
+    'draft-saved': '下一场草稿已保存',
+    'draft-save-conflict': '草稿保存冲突被拒',
+    'draft-published': '草稿已发布为下一场序列',
+    'draft-discarded': '草稿已放弃',
+    'position-online': '岗位上线',
+    'position-offline': '岗位离线',
+  };
+
+  function renderLog(log) {
+    return log.slice().reverse().map((e) => {
+      const label = EVENT_LABELS[e.event] || e.event;
+      const detail = Object.entries(e.detail || {})
+        .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : JSON.stringify(v)}`)
+        .join(' ');
+      const cls = ['cue-timeout', 'confirm-duplicate', 'confirm-late',
+        'stale-confirm-ignored', 'stale-timeout-ignored', 'stale-substitute-ignored',
+        'cue-recalled', 'cue-paused', 'paused-confirm-rejected',
+        'lease-expired', 'lease-acquire-denied', 'lease-op-denied',
+        'stale-lease-heartbeat-ignored', 'draft-save-conflict'].includes(e.event)
+        ? 'log-warn' : '';
+      return `<div class="log-row ${cls}"><span class="log-ts">${fmtTime(e.ts)}</span>` +
+        `<span class="log-event">${label}</span><span class="log-detail">${escapeHtml(detail)}</span></div>`;
+    }).join('');
+  }
+
+  // 渲染某条口令已封存的只读历史轮次（撤回/推进封存，新轮次不可再修改）
+  function renderAttempts(hist, cue) {
+    if (!hist || !Array.isArray(hist.attempts) || hist.attempts.length === 0) return '';
+    return hist.attempts.slice().reverse().map((a) => {
+      const subs = a.substitutions || {};
+      const effective = (cue.targets || []).map((t) => (subs[t] ? subs[t].substitute : t));
+      const confs = a.confirmations || {};
+      const confirmed = Object.keys(confs);
+      const timedOut = a.timedOut || [];
+      const pending = effective.filter((t) => !confirmed.includes(t) && !timedOut.includes(t));
+      const chips = [
+        ...confirmed.map((t) =>
+          `<span class="chip ok">${escapeHtml(t)} · 已确认${confs[t].late ? '（迟到）' : ''}</span>`),
+        ...timedOut.map((t) => `<span class="chip timeout">${escapeHtml(t)} · 超时未确认</span>`),
+        ...pending.map((t) => `<span class="chip">${escapeHtml(t)} · 未确认（轮次${a.endState === 'recalled' ? '撤回' : '结束'}）</span>`),
+      ].join('');
+      const subLine = Object.keys(subs).length
+        ? `<div class="attempt-sub">替岗：${Object.entries(subs).map(([from, s]) =>
+          `${escapeHtml(from)} → ${escapeHtml(s.substitute)}`).join('；')}</div>`
+        : '';
+      const stateBadge = a.endState === 'recalled'
+        ? `<span class="chip timeout">第 ${a.revision} 版 · 已撤回封存</span>`
+        : `<span class="chip ok">第 ${a.revision} 版 · 已完成封存</span>`;
+      const reasonLine = a.endState === 'recalled' && a.reason
+        ? `<div class="attempt-reason">撤回原因：${escapeHtml(a.reason)}</div>` : '';
+      return `<div class="attempt-row ${a.endState}">
+        <div class="attempt-head">${stateBadge}
+          <span class="muted">${fmtTime(a.startedAt)} – ${fmtTime(a.endedAt)}</span></div>
+        <div class="attempt-text">旧口令：${escapeHtml(a.text)}</div>
+        ${reasonLine}
+        <div class="attempt-chips">${chips || '<span class="muted">无确认记录</span>'}</div>
+        ${subLine}
+      </div>`;
+    }).join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  // 各端统一的「已发布版本 / 草稿版本」状态条。
+  // 已发布版本号只在导演端保存序列或重置发布草稿时递增；草稿 revision 为其自身乐观锁版本号。
+  function renderVersionBar(state) {
+    const pub = state.publishedVersion || 0;
+    const draft = state.draft;
+    const draftChip = draft
+      ? `<span class="vchip vchip-draft">📝 下一场草稿：第 ${draft.revision} 版` +
+        `（基于已发布 v${draft.basedOnVersion}，${draft.cues.length} 条）</span>`
+      : '<span class="vchip vchip-none">无下一场草稿</span>';
+    return `<div class="version-bar">` +
+      `<span class="vchip vchip-pub">🔒 已发布序列版本：v${pub}</span>${draftChip}</div>`;
+  }
+
+  return { connect, getClientId, fmtTime, renderLog, renderAttempts, renderVersionBar, escapeHtml };
+})();

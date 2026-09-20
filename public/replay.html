@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>演出复盘 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎞️ 演出复盘（只读）</h1>
+    <nav>
+      <a href="annotations.html">复盘批注簿</a>
+      <a href="playlist.html">复盘播放清单</a>
+      <a href="compare.html">场次对比</a>
+      <a href="latency.html">确认延迟诊断</a>
+      <a href="archive.html">复盘归档</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main>
+    <!-- 场次列表 -->
+    <section id="listView">
+      <div class="card">
+        <h2>已结束场次</h2>
+        <div id="listWarn" class="replay-warn"></div>
+        <div id="sessionLoading" class="muted">正在读取 data 目录中的事件日志…</div>
+        <table id="sessionTable" style="display:none">
+          <thead>
+            <tr>
+              <th>场次（开始 → 结束）</th>
+              <th>口令数</th>
+              <th>事件数</th>
+              <th>时长</th>
+              <th>确认时限</th>
+              <th>日志文件 / 段落</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sessionTbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 单场复盘 -->
+    <section id="playerView" class="replay-layout" style="display:none">
+      <div class="card">
+        <div class="row" style="margin-bottom:6px">
+          <a href="replay.html" class="muted" style="flex:0 0 auto">← 返回场次列表</a>
+        </div>
+        <h2 id="playerTitle">场次复盘</h2>
+        <div class="replay-meta" id="playerMeta"></div>
+        <div id="playerWarn" class="replay-warn"></div>
+
+        <!-- 筛选 -->
+        <div class="replay-filters" style="margin-top:14px">
+          <label>事件类型</label>
+          <select id="typeFilter"></select>
+          <label>岗位</label>
+          <select id="positionFilter"></select>
+        </div>
+
+        <!-- 可拖动时间轴 -->
+        <div class="timeline-wrap">
+          <div class="timeline" id="timeline" title="点击 / 拖动跳转到任意时刻（从起点确定性重放）">
+            <div class="playhead" id="playhead"></div>
+          </div>
+          <div class="timeline-scale"><span>0:00</span><span id="scaleEnd"></span></div>
+        </div>
+
+        <!-- 播放控制 -->
+        <div class="transport">
+          <button id="playBtn">▶ 播放</button>
+          <button class="secondary" id="restartBtn">⏮ 回到起点</button>
+          <span class="muted">速度</span>
+          <button class="mini speed-btn secondary" data-speed="1" aria-pressed="true">1×</button>
+          <button class="mini speed-btn secondary" data-speed="2" aria-pressed="false">2×</button>
+          <button class="mini speed-btn secondary" data-speed="4" aria-pressed="false">4×</button>
+          <span class="time-readout"><span id="timeNow">0:00.0</span> / <span id="timeEnd">0:00.0</span></span>
+        </div>
+        <div class="replay-kbd" style="margin-top:8px">空格键播放 / 暂停，← / → 前后跳转 1 秒；拖动时间轴或点击事件行可跳转到任意时刻。</div>
+      </div>
+
+      <div class="replay-state-grid">
+        <div class="card">
+          <h2>当前现场（重放状态）</h2>
+          <div id="statePanel"></div>
+        </div>
+        <div class="card">
+          <h2>口令序列</h2>
+          <div id="cuePanel"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>事件时间轴（逐行事件日志）</h2>
+        <div class="replay-event-list" id="eventList"></div>
+      </div>
+
+      <!-- 复盘批注簿入口：从当前播放位置圈定区间；批注仅存本浏览器 IndexedDB -->
+      <div class="card">
+        <h2>📓 复盘批注簿（只读 · 批注仅存本浏览器 IndexedDB）</h2>
+        <div class="muted" style="margin-bottom:10px;line-height:1.7">
+          圈定本场一段时间并填写批注与标签：先在时间轴上播放 / 拖到区间起点，依次点「圈定起点」「圈定终点」（自动吸附到当前时刻最近的已发生事件），
+          再填写批注。锚点记录首尾事件 canonical JSON 的 SHA-256 与指纹出现序号，重载日志自动重定位，找不到或顺序倒置则标失效并保留原文。
+          全部批注管理（筛选、导入 / 导出）见 <a href="annotations.html">复盘批注簿</a>。
+        </div>
+        <div class="transport" style="margin-top:0">
+          <button class="secondary" id="annMarkStart">① 圈定起点（当前位置）</button>
+          <button class="secondary" id="annMarkEnd" disabled>② 圈定终点（当前位置）</button>
+          <button class="secondary mini" id="annClearMarks" style="display:none">清除圈定</button>
+          <span id="annMarkInfo" class="muted" style="flex:1;text-align:right"></span>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="annCreateBtn" disabled>③ 填写批注…</button>
+          <a class="narrow" href="annotations.html" id="annBookLink"><button class="secondary" type="button">打开复盘批注簿</button></a>
+          <span class="muted" id="annCount"></span>
+        </div>
+        <div id="annMiniList" class="ann-mini-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="common.js"></script>
+  <script src="replay.js"></script>
+  <script src="annotations.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    const esc = CueClient.escapeHtml;
+
+    const listView = document.getElementById('listView');
+    const playerView = document.getElementById('playerView');
+    const listWarn = document.getElementById('listWarn');
+    const sessionLoading = document.getElementById('sessionLoading');
+    const sessionTable = document.getElementById('sessionTable');
+    const sessionTbody = document.getElementById('sessionTbody');
+    const playerWarn = document.getElementById('playerWarn');
+    const playerMeta = document.getElementById('playerMeta');
+    const playerTitle = document.getElementById('playerTitle');
+    const typeFilter = document.getElementById('typeFilter');
+    const positionFilter = document.getElementById('positionFilter');
+    const timelineEl = document.getElementById('timeline');
+    const playheadEl = document.getElementById('playhead');
+    const playBtn = document.getElementById('playBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const timeNowEl = document.getElementById('timeNow');
+    const timeEndEl = document.getElementById('timeEnd');
+    const scaleEndEl = document.getElementById('scaleEnd');
+    const statePanel = document.getElementById('statePanel');
+    const cuePanel = document.getElementById('cuePanel');
+    const eventList = document.getElementById('eventList');
+
+    const WARN_EVENTS = new Set([
+      'cue-timeout', 'cue-recalled', 'cue-paused', 'confirm-duplicate', 'confirm-late',
+      'paused-confirm-rejected', 'stale-confirm-ignored', 'stale-timeout-ignored',
+      'stale-substitute-ignored', 'lease-expired', 'lease-acquire-denied',
+      'lease-op-denied', 'stale-lease-heartbeat-ignored', 'draft-save-conflict',
+    ]);
+    // 时间轴标记配色（按事件分类）
+    const MARKER_COLORS = {
+      '发出口令': '#2f6fed', '口令完成': '#2f6f4a', '全部口令完成': '#8fe3a5',
+      '演出开始': '#8fe3a5', '修订版重新发出': '#b5651d', '撤回并纠正重发': '#d9822b',
+      '岗位确认': '#4caf7d', '迟到确认': '#f0c169', '重复确认': '#7c8398',
+      '确认超时': '#ff7676', '口令暂停': '#f0c169', '口令恢复': '#8ab4ff',
+      '临时替岗': '#c084fc', '场次重置': '#ff7676', '岗位上线': '#5d6478', '岗位离线': '#4a4f5e',
+    };
+
+    // 场次数据
+    let data = null;
+    let events = [];
+    let duration = 0;
+    let currentT = 0;
+    let playing = false;
+    let speed = 1;
+    let rafId = null;
+    let lastFrameAt = 0;
+    const MAX_TRAIL_MS = 60000; // 时间轴末端留白，便于查看最后一个事件
+
+    // ---------------------------------------------------------------------
+    // 场次列表
+    // ---------------------------------------------------------------------
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+    function fmtT(ms) {
+      const sign = ms < 0 ? '-' : '';
+      ms = Math.abs(Math.round(ms * 10) / 10);
+      const m = Math.floor(ms / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      const tenth = Math.floor((ms % 1000) / 100);
+      return `${sign}${m}:${String(s).padStart(2, '0')}.${tenth}`;
+    }
+
+    async function loadList() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessionLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessionLoading.style.display = 'none';
+
+      const warnFiles = Object.entries(payload.fileWarnings || {});
+      if (warnFiles.length) {
+        listWarn.classList.add('show');
+        listWarn.innerHTML = '⚠️ 检测到事件日志中存在损坏记录，已逐行跳过（不影响整场复盘）：<br>' +
+          warnFiles.map(([fileId, w]) =>
+            `日志 <code>${esc(fileId.slice(0, 8))}…</code> 共 ${w.count} 行损坏` +
+            (w.samples && w.samples[0] ? `，首处第 ${w.samples[0].line} 行：${esc(w.samples[0].reason)}` : '')
+          ).join('<br>');
+      }
+
+      if (!payload.sessions.length) {
+        sessionTable.style.display = 'none';
+        const empty = document.createElement('div');
+        empty.className = 'muted';
+        empty.textContent = 'data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次。';
+        listWarn.after(empty);
+        return;
+      }
+      sessionTable.style.display = '';
+      sessionTbody.innerHTML = payload.sessions.map((s) => `
+        <tr>
+          <td>${esc(fmtClock(s.startedAt))} → ${esc(fmtClock(s.finishedAt))}</td>
+          <td>${s.cueCount}</td>
+          <td>${s.eventCount}</td>
+          <td>${esc(fmtDuration(s.durationMs))}</td>
+          <td><span class="muted">${s.timeoutSec}s</span></td>
+          <td><span class="muted" title="${esc(s.fileId)}">${esc(s.fileId.slice(0, 8))}… #${s.runId + 1}</span></td>
+          <td><a href="replay.html?file=${encodeURIComponent(s.fileId)}&run=${s.runId}"><button class="mini">复盘 ▶</button></a></td>
+        </tr>`).join('');
+    }
+
+    // ---------------------------------------------------------------------
+    // 单场加载
+    // ---------------------------------------------------------------------
+    function renderWarnings() {
+      const ws = data.warnings || [];
+      if (!ws.length) {
+        playerWarn.classList.remove('show');
+        playerWarn.innerHTML = '';
+        return;
+      }
+      playerWarn.classList.add('show');
+      playerWarn.innerHTML = `⚠️ 本场事件日志中检测到 <b>${ws.length}</b> 行损坏记录，已逐行跳过并继续解析，复盘未中断：` +
+        ws.slice(0, 5).map((w) =>
+          `<span class="badline">第 ${w.line} 行：${esc(w.reason)}${w.raw ? ` — ${esc(w.raw)}` : ''}</span>`
+        ).join('') + (ws.length > 5 ? `<span class="muted">…其余 ${ws.length - 5} 行略</span>` : '');
+    }
+
+    function buildFilters() {
+      typeFilter.innerHTML = '<option value="all">全部事件类型</option>' +
+        Replay.CATEGORIES.map((c) =>
+          `<optgroup label="${esc(c.name)}">` +
+          `<option value="cat:${esc(c.name)}">${esc(c.name)}（整组）</option>` +
+          c.events.map((e) => `<option value="ev:${esc(e)}">${esc(Replay.eventLabel(e))}</option>`).join('') +
+          '</optgroup>'
+        ).join('');
+      typeFilter.value = 'all';
+
+      positionFilter.innerHTML = '<option value="all">全部岗位</option>' +
+        data.positions.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+      positionFilter.value = 'all';
+    }
+
+    function eventPassesFilter(ev) {
+      const tv = typeFilter.value;
+      if (tv.startsWith('cat:')) {
+        if (Replay.categoryOf(ev.event) !== tv.slice(4)) return false;
+      } else if (tv.startsWith('ev:')) {
+        if (ev.event !== tv.slice(3)) return false;
+      }
+      const pv = positionFilter.value;
+      if (pv !== 'all' && !ev.positions.includes(pv)) return false;
+      return true;
+    }
+
+    function detailText(ev) {
+      const d = ev.detail || {};
+      switch (ev.event) {
+        case 'cue-started':
+        case 'cue-resent':
+          return `#${d.seq}${ev.event === 'cue-resent' ? ` v${d.revision}` : ''} ${d.text}` +
+            (d.reason ? `（原因：${d.reason}）` : '') + ` → [${(d.targets || []).join('、')}]`;
+        case 'cue-recalled':
+          return `#${d.seq} v${d.oldRevision}→v${d.newRevision}：${d.reason}，新口令「${d.newText}」`;
+        case 'cue-completed': return `#${d.seq} 全员确认完成`;
+        case 'cue-timeout': return `#${d.seq} 超时未确认：${(d.missing || []).join('、')}`;
+        case 'confirm':
+        case 'confirm-late':
+        case 'confirm-duplicate': return `#${d.seq} ${d.position}${ev.event === 'confirm-late' ? '（迟到）' : ev.event === 'confirm-duplicate' ? '（重复）' : ''}`;
+        case 'position-substituted': return `#${d.seq} ${d.from} → ${d.to}`;
+        case 'cue-paused': return `#${d.seq} 原因：${d.reason}，冻结余量 ${d.remainingSec}s`;
+        case 'cue-resumed': return `#${d.seq} 恢复，余量 ${d.remainingSec}s`;
+        case 'paused-confirm-rejected': return `#${d.seq} ${d.position} 暂停中确认被拒`;
+        case 'stale-confirm-ignored': return `#${d.seq} ${d.position} 旧轮次确认被拒`;
+        case 'stale-timeout-ignored': return `#${d.seq} 旧定时器回调被拒`;
+        case 'session-start': return '本场开始';
+        case 'sequence-finished': return '全部口令完成';
+        default:
+          return Object.entries(d).map(([k, v]) =>
+            `${k}=${Array.isArray(v) ? v.join('/') : (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v))}`).join(' ');
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 时间轴渲染（口令条带 + 事件标记 + 播放头）
+    // ---------------------------------------------------------------------
+    function buildTimeline() {
+      timelineEl.querySelectorAll('.cue-band, .marker').forEach((el) => el.remove());
+      const endMs = duration + MAX_TRAIL_MS;
+      const pct = (t) => `left:${Math.max(0, Math.min(100, (t / endMs) * 100))}%`;
+
+      // 口令条带：以每个 cue-started 到下一个 cue-started（或全场结束）为一段
+      const starts = events.filter((e) => e.event === 'cue-started');
+      starts.forEach((st, i) => {
+        const next = starts[i + 1];
+        const endT = next ? next.t : duration;
+        const band = document.createElement('div');
+        band.className = 'cue-band' + (i % 2 ? ' even' : '');
+        band.style.cssText = `${pct(st.t)};width:${Math.max(0.6, ((endT - st.t) / endMs) * 100)}%`;
+        band.textContent = `#${st.detail.seq} ${st.detail.text || ''}`;
+        band.title = band.textContent;
+        timelineEl.appendChild(band);
+      });
+
+      // 事件标记（应用当前筛选）
+      events.forEach((ev, idx) => {
+        if (!eventPassesFilter(ev)) return;
+        const mk = document.createElement('div');
+        mk.className = 'marker';
+        mk.style.cssText = pct(ev.t);
+        mk.style.background = MARKER_COLORS[Replay.eventLabel(ev.event)] || '#5d6478';
+        mk.title = `+${fmtT(ev.t)} ${Replay.eventLabel(ev.event)}：${detailText(ev)}`;
+        mk.addEventListener('mousedown', (e) => { e.stopPropagation(); seekTo(ev.t); });
+        timelineEl.appendChild(mk);
+      });
+
+      scaleEndEl.textContent = fmtT(duration);
+      timeEndEl.textContent = fmtT(duration);
+    }
+
+    // ---------------------------------------------------------------------
+    // 事件列表
+    // ---------------------------------------------------------------------
+    let listRowEls = [];
+    function buildEventList() {
+      listRowEls = [];
+      eventList.innerHTML = events.map((ev, idx) => {
+        if (!eventPassesFilter(ev)) return '';
+        const warn = WARN_EVENTS.has(ev.event) ? ' is-warn' : '';
+        return `<div class="replay-event-row${warn}" data-idx="${idx}" data-t="${ev.t}">` +
+          `<span class="replay-event-t">+${fmtT(ev.t)}</span>` +
+          `<span class="replay-event-name">${esc(Replay.eventLabel(ev.event))}</span>` +
+          `<span class="replay-event-detail">${esc(detailText(ev))}</span></div>`;
+      }).join('');
+      eventList.querySelectorAll('.replay-event-row').forEach((row) => {
+        const t = Number(row.dataset.t);
+        row.addEventListener('click', () => seekTo(t));
+        listRowEls.push({ el: row, t });
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // 确定性重放渲染：每次都从起点 fold 到 currentT
+    // ---------------------------------------------------------------------
+    function renderState() {
+      const s = Replay.foldUntil(events, currentT);
+      const view = Replay.viewOf(s);
+
+      const phaseText = { idle: '待开始', active: '口令进行中', between: '口令已完成（待推进）', done: '全场已结束' }[s.phase];
+      const phaseCls = { idle: 'replay-phase-idle', active: 'replay-phase-active', between: 'replay-phase-active', done: 'replay-phase-done' }[s.phase];
+
+      let cueHtml = '';
+      if (s.phase === 'idle') {
+        cueHtml = '<div class="big-cue replay-phase-idle" style="font-size:22px;padding:24px 8px">等待演出开始…</div>';
+      } else if (s.phase === 'done') {
+        cueHtml = '<div class="big-cue replay-phase-done" style="font-size:22px;padding:24px 8px">✅ 全部口令已完成，本场结束</div>';
+      } else if (s.seq != null) {
+        const revBadge = s.revision > 1
+          ? `<span class="rev-badge">第 ${s.revision} 版（撤回修订）</span><div class="rev-reason">撤回原因：${esc(s.reason || '')}</div>`
+          : '<span class="rev-badge rev-initial">第 1 版</span>';
+        const pauseHtml = s.paused
+          ? `<div class="status-banner warn show">⏸ 已暂停：${esc(s.pauseReason || '')}</div>` : '';
+        cueHtml = `
+          <div class="big-cue">
+            <span class="cue-seq">第 ${s.seq} / ${data.sequence.length} 条</span>
+            ${esc(s.text)}
+          </div>
+          <div style="text-align:center">${revBadge}</div>
+          ${pauseHtml}
+          <div class="replay-chips-line">
+            ${view.confirmed.map((c) =>
+              `<span class="chip ${c.late ? 'late' : 'ok'}">${esc(c.position)} · ${c.late ? '迟到确认' : '已确认'}</span>`).join('')}
+            ${view.timedOut.map((t) => `<span class="chip timeout">${esc(t)} · 超时未确认</span>`).join('')}
+            ${view.pending.map((t) => `<span class="chip">${esc(t)} · 待确认</span>`).join('')}
+          </div>`;
+        if (s.revision > 1 && s.originalText && s.originalText !== s.text) {
+          cueHtml += `<div class="muted" style="margin-top:8px">原始口令：${esc(s.originalText)}</div>`;
+        }
+        const subs = Object.entries(s.substitutions);
+        if (subs.length) {
+          cueHtml += `<div style="margin-top:8px">${subs.map(([from, v]) =>
+            `<span class="chip"><span class="replay-cue-sub">${esc(from)}</span> → ${esc(v.substitute)} 临时替岗</span>`).join('')}</div>`;
+        }
+      }
+
+      // 已封存历史轮次（撤回 / 完成）
+      let attemptsHtml = '';
+      if (s.attempts && s.attempts.length) {
+        attemptsHtml = '<h2 style="margin-top:18px">历史轮次（只读封存）</h2>' +
+          CueClient.renderAttempts({ attempts: s.attempts.slice().reverse() }, { targets: s.targets });
+      }
+
+      statePanel.innerHTML = `
+        <div class="row" style="margin-bottom:8px">
+          <span class="${phaseCls}" style="flex:0 0 auto;font-weight:600">● ${phaseText}</span>
+          <span class="muted" style="text-align:right">事件时间 +${fmtT(currentT)}</span>
+        </div>
+        ${cueHtml}${attemptsHtml}`;
+
+      // 口令序列总览：已完成 / 进行中 / 未开始
+      cuePanel.innerHTML = data.sequence.map((c) => {
+        const r = s.results[c.seq];
+        let cls = '', mark = '○';
+        if (r === 'completed') { cls = 'ok'; mark = '✅'; }
+        else if (r === 'active') { cls = ''; mark = '▶'; }
+        return `<div style="padding:6px 0;border-bottom:1px solid #2c3040">
+          <span class="chip ${cls}">${mark} #${c.seq}</span>
+          <span style="${r === 'active' ? 'color:#8ab4ff' : ''}">${esc(c.text)}</span>
+          <span class="muted" style="font-size:12px">→ ${c.targets.map(esc).join('、')}</span>
+        </div>`;
+      }).join('');
+    }
+
+    // ---------------------------------------------------------------------
+    // 播放头 / 事件行高亮
+    // ---------------------------------------------------------------------
+    function renderPlayhead() {
+      const endMs = duration + MAX_TRAIL_MS;
+      playheadEl.style.left = `${Math.max(0, Math.min(100, (currentT / endMs) * 100))}%`;
+      timeNowEl.textContent = fmtT(currentT);
+
+      let lastVisible = null;
+      for (const r of listRowEls) {
+        const applied = r.t <= currentT;
+        r.el.classList.toggle('applied', applied);
+        if (applied) lastVisible = r.el;
+      }
+      return lastVisible;
+    }
+
+    function render() {
+      renderState();
+      const lastVisible = renderPlayhead();
+      // 顺序播放时自动跟随；用户手动拖动列表不打断跟随（仅播放中滚动）
+      if (playing && lastVisible) {
+        lastVisible.scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 播放控制
+    // ---------------------------------------------------------------------
+    function setPlaying(v) {
+      playing = v;
+      playBtn.textContent = playing ? '⏸ 暂停' : '▶ 播放';
+      if (playing) {
+        if (currentT >= duration) currentT = 0; // 已在末尾再点播放：从头开始
+        lastFrameAt = performance.now();
+        const tick = (now) => {
+          if (!playing) return;
+          const dt = now - lastFrameAt;
+          lastFrameAt = now;
+          currentT = Math.min(duration, currentT + dt * speed);
+          render();
+          if (currentT >= duration) { setPlaying(false); return; }
+          rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+      } else if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    }
+
+    // 任意时间点跳转：直接把目标时刻交给 foldUntil 从起点确定性重放，
+    // 不做增量状态修补——保证跳转后现场与顺序播放到该时刻完全一致
+    function seekTo(t) {
+      currentT = Math.max(0, Math.min(duration, t));
+      render();
+    }
+
+    // 时间轴拖动
+    let dragging = false;
+    function seekFromPointer(clientX) {
+      const rect = timelineEl.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      seekTo(ratio * (duration + MAX_TRAIL_MS));
+    }
+    timelineEl.addEventListener('mousedown', (e) => {
+      dragging = true;
+      seekFromPointer(e.clientX);
+    });
+    window.addEventListener('mousemove', (e) => { if (dragging) seekFromPointer(e.clientX); });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    playBtn.addEventListener('click', () => setPlaying(!playing));
+    restartBtn.addEventListener('click', () => { setPlaying(false); seekTo(0); });
+    document.querySelectorAll('.speed-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        speed = Number(btn.dataset.speed);
+        document.querySelectorAll('.speed-btn').forEach((b) =>
+          b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === speed)));
+      });
+    });
+    window.addEventListener('keydown', (e) => {
+      if (!data || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+      if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+      else if (e.code === 'ArrowLeft') { setPlaying(false); seekTo(currentT - 1000); }
+      else if (e.code === 'ArrowRight') { setPlaying(false); seekTo(currentT + 1000); }
+    });
+
+    typeFilter.addEventListener('change', () => { buildTimeline(); buildEventList(); renderPlayhead(); });
+    positionFilter.addEventListener('change', () => { buildTimeline(); buildEventList(); renderPlayhead(); });
+
+    // ---------------------------------------------------------------------
+    // 复盘批注簿：从当前播放位置圈定区间 → 跳转批注页填写；
+    // 批注只存浏览器 IndexedDB（CueAnnotations），本页不发起任何写请求。
+    // ---------------------------------------------------------------------
+    const annMarkStart = document.getElementById('annMarkStart');
+    const annMarkEnd = document.getElementById('annMarkEnd');
+    const annClearMarks = document.getElementById('annClearMarks');
+    const annMarkInfo = document.getElementById('annMarkInfo');
+    const annCreateBtn = document.getElementById('annCreateBtn');
+    const annBookLink = document.getElementById('annBookLink');
+    const annCount = document.getElementById('annCount');
+    const annMiniList = document.getElementById('annMiniList');
+
+    let markStartIdx = null;
+    let markEndIdx = null;
+    let sessionAnnotations = []; // 本场批注（含重定位结果 resolved）
+    let annOccTable = null;
+
+    // 当前播放位置最近的「已发生」事件索引（t <= currentT）；起点之前回退为 0
+    function currentEventIndex() {
+      let idx = 0;
+      for (let i = 0; i < events.length; i++) {
+        if (events[i].t <= currentT) idx = i;
+        else break;
+      }
+      return idx;
+    }
+
+    function refreshMarkInfo() {
+      const s = markStartIdx != null ? `起点 +${fmtT(events[markStartIdx].t)}` : '';
+      const e = markEndIdx != null ? `终点 +${fmtT(events[markEndIdx].t)}` : '';
+      annMarkInfo.textContent = [s, e].filter(Boolean).join('　→　');
+      annClearMarks.style.display = (markStartIdx != null || markEndIdx != null) ? '' : 'none';
+      annCreateBtn.disabled = !(markStartIdx != null && markEndIdx != null);
+    }
+
+    function clearMarks() {
+      markStartIdx = null;
+      markEndIdx = null;
+      annMarkEnd.disabled = true;
+      refreshMarkInfo();
+    }
+
+    annMarkStart.addEventListener('click', () => {
+      markStartIdx = currentEventIndex();
+      markEndIdx = null;
+      annMarkEnd.disabled = false;
+      annCreateBtn.disabled = true;
+      refreshMarkInfo();
+    });
+    annMarkEnd.addEventListener('click', () => {
+      if (markStartIdx == null) return;
+      const idx = currentEventIndex();
+      markEndIdx = Math.max(markStartIdx, idx); // 终点不允许早于起点（同事件可构成零长区间）
+      refreshMarkInfo();
+    });
+    annClearMarks.addEventListener('click', clearMarks);
+    annCreateBtn.addEventListener('click', () => {
+      if (markStartIdx == null || markEndIdx == null || !data) return;
+      const u = new URL('annotations.html', location.href);
+      u.searchParams.set('file', data.session.fileId);
+      u.searchParams.set('run', String(data.session.runId));
+      u.searchParams.set('si', String(markStartIdx));
+      u.searchParams.set('ei', String(markEndIdx));
+      location.href = u.pathname + u.search;
+    });
+
+    // 时间轴上的批注区间层：有效绿色实带（点击跳到区间起点）、失效红色虚带
+    function renderAnnotationBands() {
+      timelineEl.querySelectorAll('.ann-band').forEach((el) => el.remove());
+      if (!sessionAnnotations.length) return;
+      const endMs = duration + MAX_TRAIL_MS;
+      const pct = (t) => Math.max(0, Math.min(100, (t / endMs) * 100));
+      sessionAnnotations.forEach((item) => {
+        const r = item.resolved;
+        const t0 = r.valid ? r.startT : item.ann.startT;
+        const t1 = r.valid ? r.endT : item.ann.endT;
+        if (t0 == null || t1 == null) return;
+        const left = pct(Math.min(t0, t1));
+        const width = Math.max(0.8, pct(Math.max(t0, t1)) - left);
+        const band = document.createElement('div');
+        band.className = 'ann-band' + (r.valid ? ' valid' : ' invalid');
+        band.style.cssText = `left:${left}%;width:${width}%`;
+        band.title = `${r.valid ? '有效批注' : '失效批注（原文保留）'}：${(item.ann.tags || []).join('、') || '无标签'} — ${item.ann.text}`;
+        if (r.valid) band.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          setPlaying(false);
+          seekTo(r.startT);
+        });
+        timelineEl.appendChild(band);
+      });
+    }
+
+    function renderAnnotationMiniList() {
+      const validN = sessionAnnotations.filter((x) => x.resolved.valid).length;
+      const invalidN = sessionAnnotations.length - validN;
+      const conflictN = sessionAnnotations.filter((x) => x.ann.conflict).length;
+      annCount.textContent = `本场批注 ${sessionAnnotations.length} 条（有效 ${validN} / 失效 ${invalidN}${conflictN ? ` / 冲突 ${conflictN}` : ''}）`;
+      if (!sessionAnnotations.length) {
+        annMiniList.innerHTML = '<div class="muted">本场尚无批注。</div>';
+        return;
+      }
+      annMiniList.innerHTML = sessionAnnotations
+        .slice()
+        .sort((a, b) => new Date(b.ann.createdAt) - new Date(a.ann.createdAt))
+        .map((item) => {
+          const { ann, resolved } = item;
+          const jump = resolved.valid
+            ? `<a href="#" data-jump="${resolved.startT}" class="ann-mini-jump">↗ 跳到区间起点 +${fmtT(resolved.startT)}</a>`
+            : '<span class="ann-mini-jump disabled" title="' + esc(resolved.reason || '批注已失效') + '">✖ 失效（原文保留）</span>';
+          const conflict = ann.conflict ? '<span class="ann-badge conflict">⚠️ 冲突</span>' : '';
+          const tags = (ann.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
+          const range = resolved.valid
+            ? `+${fmtT(resolved.startT)} → +${fmtT(resolved.endT)}`
+            : `+${fmtT(ann.startT)} → +${fmtT(ann.endT)}（圈定时记录）`;
+          return `<div class="ann-mini-row ${resolved.valid ? '' : 'is-invalid'}">
+            <div class="ann-mini-head">${conflict}${jump}<span class="muted">${range}</span></div>
+            <div>${esc(ann.text) || '<span class="muted">（无批注文本）</span>'}</div>
+            <div>${tags}</div>
+          </div>`;
+        }).join('');
+      annMiniList.querySelectorAll('[data-jump]').forEach((a) => {
+        a.addEventListener('click', (e) => { e.preventDefault(); setPlaying(false); seekTo(Number(a.dataset.jump)); });
+      });
+    }
+
+    async function loadSessionAnnotations() {
+      if (!data || !annOccTable) return;
+      let all = [];
+      try {
+        all = await CueAnnotations.getAll();
+      } catch {
+        annCount.textContent = 'IndexedDB 不可用，批注未加载（本页仍为纯只读，不影响复盘）';
+        return;
+      }
+      sessionAnnotations = all
+        .filter((a) => a.sessionRef.fileId === data.session.fileId && Number(a.sessionRef.runId) === data.session.runId)
+        .map((ann) => ({ ann, resolved: CueAnnotations.relocalize(ann, annOccTable) }))
+        .map((item) => {
+          if (item.resolved.valid) {
+            item.resolved.startT = events[item.resolved.startIndex].t;
+            item.resolved.endT = events[item.resolved.endIndex].t;
+          }
+          return item;
+        });
+      renderAnnotationBands();
+      renderAnnotationMiniList();
+    }
+
+    // ---------------------------------------------------------------------
+    // 初始化
+    // ---------------------------------------------------------------------
+    async function initPlayer(fileId, runId, seekT) {
+      listView.style.display = 'none';
+      playerView.style.display = '';
+      let payload;
+      try {
+        payload = await (await fetch(`/api/replay/sessions/${encodeURIComponent(fileId)}/${encodeURIComponent(runId)}`)).json();
+      } catch {
+        statePanel.textContent = '';
+        playerMeta.innerHTML = '<span style="color:#ff9c9c">场次数据加载失败</span>';
+        return;
+      }
+      if (payload.error) {
+        playerMeta.innerHTML = `<span style="color:#ff9c9c">${esc(payload.error)}</span>`;
+        return;
+      }
+      data = payload;
+      events = data.events;
+      duration = events.length ? events[events.length - 1].t : 0;
+      currentT = 0;
+
+      // 批注簿：构建本场事件指纹表，「打开复盘批注簿」默认按本场筛选
+      annOccTable = await CueAnnotations.buildOccurrenceTable(events);
+      clearMarks();
+      annBookLink.href = `annotations.html?fsel=${encodeURIComponent(data.session.fileId + '/' + data.session.runId)}`;
+      loadSessionAnnotations();
+
+      playerTitle.textContent = `场次复盘：${fmtClock(data.session.startedAt)} → ${fmtClock(data.session.finishedAt)}`;
+      document.title = `复盘 ${fmtClock(data.session.startedAt)} · 舞台口令同步系统`;
+      playerMeta.innerHTML = `
+        <span>口令 <b>${data.session.cueCount}</b> 条</span>
+        <span>事件 <b>${data.session.eventCount}</b> 条</span>
+        <span>时长 <b>${esc(fmtDuration(data.session.durationMs))}</b></span>
+        <span>确认时限 <b>${data.timeoutSec}s</b></span>
+        <span title="${esc(data.session.fileId)}">日志 <b>${esc(data.session.fileId.slice(0, 8))}…</b> 第 ${data.session.runId + 1} 段</span>`;
+
+      renderWarnings();
+      buildFilters();
+      buildTimeline();
+      buildEventList();
+      seekTo(0);
+      // 场次对比等外部页面跳转：打开复盘并定位到指定相对时刻（毫秒）
+      if (Number.isFinite(seekT) && seekT > 0) seekTo(Math.min(seekT, duration));
+    }
+
+    const params = new URLSearchParams(location.search);
+    const fileId = params.get('file');
+    const runId = params.get('run');
+    const seekParam = Number(params.get('t'));
+    if (fileId && runId !== null) initPlayer(fileId, runId, seekParam);
+    else loadList();
+
+    // 从批注簿页返回本页（浏览器前进 / 后退或重新可见）时刷新批注区间带与迷你列表
+    window.addEventListener('pageshow', () => { if (data) loadSessionAnnotations(); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && data) loadSessionAnnotations();
+    });
+  })();
+  </script>
+</body>
+</html>

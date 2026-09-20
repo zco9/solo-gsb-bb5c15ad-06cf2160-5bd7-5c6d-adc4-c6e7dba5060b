@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>导演端 · 演出序列编排</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎬 导演端 · 演出序列编排</h1>
+    <nav>
+      <a href="control.html">控制端</a>
+      <a href="position.html">岗位端</a>
+      <a href="index.html">首页</a>
+      <span id="conn">未连接</span>
+    </nav>
+  </header>
+  <main>
+    <div id="toast"></div>
+    <div class="status-banner" id="banner"></div>
+    <div id="versionBar"></div>
+
+    <div class="card">
+      <h2>新建 / 编辑演出序列（演出进行中不可修改已发布序列）</h2>
+      <div id="cueRows"></div>
+      <div class="row">
+        <button class="secondary narrow" id="addRow">＋ 添加口令</button>
+        <label class="narrow" style="display:flex;align-items:center;gap:8px;flex:0 0 auto">
+          确认时限（秒）
+          <input type="number" id="timeoutSec" value="30" min="3" max="600" style="width:80px">
+        </label>
+        <button id="saveSeq" class="narrow">保存序列</button>
+      </div>
+    </div>
+
+    <div class="card" id="draftCard">
+      <h2>📝 下一场草稿（演出进行中 / 已结束时可编辑，不影响当前口令）</h2>
+      <div class="draft-conflict-banner" id="draftConflict"></div>
+      <div class="draft-status" id="draftStatus"></div>
+      <div id="draftRows"></div>
+      <div class="row">
+        <button class="secondary narrow" id="draftAddRow">＋ 添加草稿口令</button>
+        <label class="narrow" style="display:flex;align-items:center;gap:8px;flex:0 0 auto">
+          下一场确认时限（秒）
+          <input type="number" id="draftTimeoutSec" value="30" min="3" max="600" style="width:80px">
+        </label>
+        <button class="secondary narrow" id="draftLoadCurrent">⟳ 从已发布序列载入</button>
+        <button id="saveDraft" class="narrow">保存草稿</button>
+      </div>
+      <p class="muted">草稿与本场完全隔离：保存草稿不会改变正在执行的口令、目标岗位或修订档案，控制端重置时可选择「发布草稿并重置」让其生效。多个导演端可同时编辑，保存时以草稿版本号做并发校验：若他人已保存新版本，本次写入被拒绝并自动载入其最新草稿，请在其基础上重做。</p>
+    </div>
+
+    <div class="card">
+      <h2>当前已发布序列（本场冻结快照）</h2>
+      <table>
+        <thead><tr><th style="width:60px">序号</th><th>口令</th><th>目标岗位</th></tr></thead>
+        <tbody id="seqTable"><tr><td colspan="3" class="muted">尚未创建序列</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const banner = document.getElementById('banner');
+    const cueRows = document.getElementById('cueRows');
+    const seqTable = document.getElementById('seqTable');
+    const logEl = document.getElementById('log');
+    const toast = document.getElementById('toast');
+    const versionBar = document.getElementById('versionBar');
+    const draftCard = document.getElementById('draftCard');
+    const draftRows = document.getElementById('draftRows');
+    const draftStatus = document.getElementById('draftStatus');
+    const draftConflict = document.getElementById('draftConflict');
+    const draftTimeoutInput = document.getElementById('draftTimeoutSec');
+    const saveSeqBtn = document.getElementById('saveSeq');
+    const saveDraftBtn = document.getElementById('saveDraft');
+    let toastTimer = null;
+    let lastState = null;
+
+    // 草稿编辑器状态：
+    // draftBaseRevision —— 编辑器当前内容所基于的草稿版本（null=尚无草稿，本次保存将创建第 1 版）
+    // draftLoadedSig    —— 已载入到编辑器的草稿签名（revision@updatedAt），用于识别服务端草稿变化但不打断输入
+    // draftDirty        —— 本机是否有未保存的编辑：为 true 时不自动用他人新版本覆盖输入，改为提示手动载入
+    let draftBaseRevision = null;
+    let draftLoadedSig = '';
+    let draftDirty = false;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.style.display = 'none'), 3000);
+    }
+
+    // 通用：在指定容器中添加一行口令编辑行
+    function addCueRow(container, text = '', targets = '') {
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML =
+        `<span class="narrow row-seq" style="flex:0 0 32px;color:#8ab4ff"></span>` +
+        `<input type="text" class="cue-text" placeholder="口令内容，如：灯光渐暗，音乐起" value="${CueClient.escapeHtml(text)}">` +
+        `<input type="text" class="cue-targets" placeholder="目标岗位，逗号分隔，如：灯光,音响" value="${CueClient.escapeHtml(targets)}">` +
+        `<button class="danger narrow del-row">删除</button>`;
+      div.querySelector('.del-row').onclick = () => { div.remove(); renumberRows(container); };
+      container.appendChild(div);
+      renumberRows(container);
+    }
+
+    function renumberRows(container) {
+      container.querySelectorAll('.row-seq').forEach((el, i) => (el.textContent = i + 1));
+    }
+
+    function readRows(container) {
+      return [...container.querySelectorAll('.row')].map((row) => ({
+        text: row.querySelector('.cue-text').value.trim(),
+        targets: row.querySelector('.cue-targets').value
+          .split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      }));
+    }
+
+    function addRow(text = '', targets = '') { addCueRow(cueRows, text, targets); }
+    function addDraftRow(text = '', targets = '') { addCueRow(draftRows, text, targets); }
+
+    document.getElementById('addRow').onclick = () => addRow();
+    document.getElementById('draftAddRow').onclick = () => addDraftRow();
+
+    saveSeqBtn.onclick = () => {
+      client.send({
+        type: 'setSequence',
+        cues: readRows(cueRows),
+        timeoutSec: Number(document.getElementById('timeoutSec').value),
+      });
+    };
+
+    saveDraftBtn.onclick = () => {
+      const rows = readRows(draftRows);
+      if (!rows.some((r) => r.text && r.targets.length > 0)) {
+        return showToast('草稿不能为空：至少保留一条含口令内容与目标岗位的行');
+      }
+      // 携带编辑器所基于的草稿 revision：与服务端当前版本不一致时写入被拒（乐观并发控制）
+      client.send({
+        type: 'saveDraft',
+        cues: rows,
+        timeoutSec: Number(draftTimeoutInput.value),
+        revision: draftBaseRevision,
+      });
+    };
+
+    // 把服务端草稿（或任意 cues 数组）载入草稿编辑器；fromServer=true 时同步基础版本号与签名
+    function loadDraftIntoEditor(draft, { fromServer = true, note } = {}) {
+      draftRows.innerHTML = '';
+      (draft.cues || []).forEach((c) => addDraftRow(c.text, (c.targets || []).join(',')));
+      if (draftRows.children.length === 0) addDraftRow();
+      draftTimeoutInput.value = draft.timeoutSec || 30;
+      draftDirty = false;
+      if (fromServer) {
+        draftBaseRevision = draft.revision;
+        draftLoadedSig = `${draft.revision}@${draft.updatedAt || 0}`;
+      }
+      if (note) showToast(note);
+    }
+
+    // 本机一旦开始编辑草稿即标记 dirty：他人保存的新版本只提示、不覆盖未保存输入
+    draftRows.addEventListener('input', () => { draftDirty = true; });
+    draftTimeoutInput.addEventListener('input', () => { draftDirty = true; });
+    document.getElementById('draftAddRow').addEventListener('click', () => { draftDirty = true; });
+    draftRows.addEventListener('click', (e) => {
+      if (e.target.closest('.del-row')) draftDirty = true;
+    });
+
+    // 「从已发布序列载入」：以当前已发布序列作为草稿起点（不自动保存，仍需点保存草稿）
+    document.getElementById('draftLoadCurrent').onclick = () => {
+      if (!lastState || lastState.sequence.length === 0) {
+        return showToast('当前还没有已发布序列可载入');
+      }
+      loadDraftIntoEditor({
+        cues: lastState.sequence.map((c) => ({ text: c.text, targets: c.targets })),
+        timeoutSec: lastState.timeoutSec,
+      }, { fromServer: false, note: '已载入已发布序列内容，修改后请点「保存草稿」' });
+      draftDirty = true; // 载入内容属于本机未保存编辑，不被广播自动覆盖
+    };
+
+    function renderDraftStatus(state) {
+      const d = state.draft;
+      if (d) {
+        draftStatus.innerHTML =
+          `已保存草稿：<b style="color:#9cc2ff">第 ${d.revision} 版</b>` +
+          `（基于已发布序列 v${d.basedOnVersion}，${d.cues.length} 条口令，确认时限 ${d.timeoutSec} 秒，` +
+          `保存于 ${CueClient.fmtTime(new Date(d.updatedAt).toISOString())}）` +
+          `<br><span class="muted">编辑器中未保存的修改不会被其他导演端的新版本覆盖；发生冲突时会自动在此载入最新草稿。</span>`;
+      } else {
+        draftStatus.innerHTML =
+          '<span class="muted">尚无草稿。可直接在下方编辑，或点「从已发布序列载入」复制当前序列；' +
+          '首次保存将创建草稿第 1 版。</span>';
+      }
+    }
+
+    function render(state) {
+      lastState = state;
+      const editingLocked = state.phase !== 'idle';
+      saveSeqBtn.disabled = editingLocked;
+      document.getElementById('addRow').disabled = editingLocked;
+      banner.className = 'status-banner' + (editingLocked ? ' show' : '');
+      banner.textContent = editingLocked
+        ? (state.phase === 'active' ? '演出进行中，已发布序列已锁定（当前场次使用开始时冻结的快照）；可在下方编辑下一场草稿'
+          : '本场已结束；可在下方编辑下一场草稿，控制端重置时选择发布')
+        : '';
+
+      versionBar.innerHTML = CueClient.renderVersionBar(state);
+
+      if (state.sequence.length === 0) {
+        seqTable.innerHTML = '<tr><td colspan="3" class="muted">尚未创建序列</td></tr>';
+      } else {
+        seqTable.innerHTML = state.sequence.map((c, i) => {
+          const cur = state.phase === 'active' && i === state.currentIndex;
+          return `<tr class="${cur ? 'current-row' : ''}"><td>${c.seq}</td>` +
+            `<td>${CueClient.escapeHtml(c.text)}</td>` +
+            `<td>${c.targets.map((t) => `<span class="chip">${CueClient.escapeHtml(t)}</span>`).join('')}</td></tr>`;
+        }).join('');
+      }
+
+      // 草稿卡片：idle（未开始）时隐藏（直接编辑已发布序列即可）；active/done 时显示
+      draftCard.style.display = editingLocked ? 'block' : 'none';
+      if (editingLocked) {
+        renderDraftStatus(state);
+        const sig = state.draft ? `${state.draft.revision}@${state.draft.updatedAt || 0}` : '';
+        if (state.draft && sig !== draftLoadedSig) {
+          if (draftDirty) {
+            // 本机有未保存编辑且他人已保存新版本：不覆盖输入，提示可一键载入最新版本
+            draftConflict.innerHTML =
+              `其他导演端已保存草稿第 ${state.draft.revision} 版（您的编辑未被覆盖）。` +
+              `<button class="mini" id="draftReload" style="margin-left:8px">载入最新草稿并在其基础上重做</button>`;
+            draftConflict.classList.add('show');
+            document.getElementById('draftReload').onclick = () => {
+              loadDraftIntoEditor(state.draft, { note: '已载入最新草稿，请在其基础上重做' });
+              draftConflict.classList.remove('show');
+              render(state);
+            };
+          } else {
+            loadDraftIntoEditor(state.draft);
+          }
+        } else if (!state.draft) {
+          // 草稿被发布或放弃：复位编辑器（保留本机未保存输入由冲突/提示流程处理，这里只处理空草稿的干净状态）
+          if (!draftDirty && draftLoadedSig !== 'empty') {
+            draftRows.innerHTML = '';
+            addDraftRow();
+            draftTimeoutInput.value = state.timeoutSec || 30;
+            draftBaseRevision = null;
+            draftLoadedSig = 'empty';
+          } else if (draftLoadedSig !== 'empty' && draftRows.children.length === 0) {
+            addDraftRow();
+            draftTimeoutInput.value = state.timeoutSec || 30;
+            draftBaseRevision = null;
+            draftLoadedSig = 'empty';
+          }
+        }
+        saveDraftBtn.disabled = false;
+      }
+
+      logEl.innerHTML = state.log.length
+        ? CueClient.renderLog(state.log)
+        : '<span class="muted">暂无事件</span>';
+    }
+
+    const client = CueClient.connect({
+      role: 'director',
+      onState: render,
+      onError: showToast,
+      onMessage(d) {
+        if (d.type === 'draft-saved' && d.draft) {
+          // 保存成功：以服务端回执为准更新基础版本（之后保存携带新 revision）。
+          // 成功广播与此定向回执可能乱序，以回执中的草稿重写编辑器即可，无需依赖可能过期的 lastState。
+          loadDraftIntoEditor(d.draft, { note: `草稿第 ${d.draft.revision} 版已保存（不影响当前口令）` });
+          draftConflict.classList.remove('show');
+        } else if (d.type === 'draft-conflict') {
+          // 多导演端冲突：本次写入被拒，服务端返回最新草稿；展示提示并载入其内容供重做
+          draftConflict.textContent = d.message || '草稿版本与服务端不一致，已载入最新草稿，请在其基础上重做';
+          draftConflict.classList.add('show');
+          showToast('草稿保存冲突：已载入其他导演端保存的最新版本');
+          if (d.draft) {
+            loadDraftIntoEditor(d.draft, { note: '已载入最新草稿，请在其基础上重做' });
+          }
+        }
+      },
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+
+    addRow(); // 默认一行
+  </script>
+</body>
+</html>

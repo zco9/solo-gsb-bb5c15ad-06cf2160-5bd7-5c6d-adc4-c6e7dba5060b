@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>确认延迟诊断 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>⏱️ 确认延迟诊断（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="compare.html">场次对比</a>
+      <a href="archive.html">复盘归档</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main class="lat-main">
+    <!-- 场次选择与筛选 -->
+    <section class="card">
+      <h2>选择已结束场次</h2>
+      <div class="muted" style="margin-bottom:12px;line-height:1.7">
+        诊断为纯只读操作：直接复用演出复盘的只读 GET 接口读取 <code>data</code> 目录事件日志，
+        按 <code>attemptId</code> 重建每条口令的每次确认轮次（含撤回修订轮次），
+        等待时长中已扣除暂停区间，替岗后的确认计入接管岗位。本页<b>不连接 WebSocket、不写入任何日志</b>。
+      </div>
+      <div class="lat-picker-row">
+        <select id="sessionSelect" disabled></select>
+        <a id="openReplay" class="compare-open-replay" href="#" target="_blank" rel="noopener" style="display:none">↗ 在复盘中打开本场</a>
+      </div>
+      <div id="sessLoading" class="muted" style="margin-top:10px">正在读取已结束场次列表…</div>
+
+      <div class="replay-filters" id="filterBar" style="display:none;margin-top:14px">
+        <label for="positionFilter">岗位</label>
+        <select id="positionFilter"></select>
+        <label for="resultFilter">结果</label>
+        <select id="resultFilter">
+          <option value="all">全部结果</option>
+          <option value="ok">最终全员按时</option>
+          <option value="late">含迟到确认</option>
+          <option value="timeout">最终仍超时</option>
+          <option value="revised">发生撤回修订</option>
+          <option value="paused">发生暂停</option>
+          <option value="substituted">发生替岗</option>
+        </select>
+        <span class="muted" id="filterHint"></span>
+      </div>
+    </section>
+
+    <div id="warnBox" class="replay-warn"></div>
+    <div id="summaryBox"></div>
+    <div id="cueList"></div>
+    <div id="emptyHint" class="card" style="display:none"></div>
+  </main>
+
+  <script src="latency.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：本脚本只发起 GET 请求（/api/replay/sessions 与单场接口），
+    // 不创建 WebSocket，也没有任何写接口调用。
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    const E = escapeHtml;
+
+    const sessionSelect = document.getElementById('sessionSelect');
+    const openReplay = document.getElementById('openReplay');
+    const sessLoading = document.getElementById('sessLoading');
+    const filterBar = document.getElementById('filterBar');
+    const positionFilter = document.getElementById('positionFilter');
+    const resultFilter = document.getElementById('resultFilter');
+    const filterHint = document.getElementById('filterHint');
+    const warnBox = document.getElementById('warnBox');
+    const summaryBox = document.getElementById('summaryBox');
+    const cueList = document.getElementById('cueList');
+    const emptyHint = document.getElementById('emptyHint');
+
+    let sessions = [];
+    let analysis = null;
+    let fileId = null;
+    let runId = null;
+
+    function refValue(s) { return `${s.fileId}/${s.runId}`; }
+    function optionLabel(s) {
+      return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 条口令 ｜ ${fmtDuration(s.durationMs)} ｜ ${s.fileId.slice(0, 8)}… #${s.runId + 1}`;
+    }
+    function replayHref(t) {
+      const q = new URLSearchParams({ file: fileId, run: String(runId) });
+      if (Number.isFinite(t) && t >= 0) q.set('t', Math.round(t));
+      return `replay.html?${q.toString()}`;
+    }
+
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+    function fmtSec(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
+    }
+
+    // ---------------------------------------------------------------------
+    // 瀑布图
+    // ---------------------------------------------------------------------
+    const ROW_H = 30; // 每个岗位行高（标签列与图区严格一致以对齐）
+    const PAUSE_H = 18; // 暂停区间道高度
+
+    function pct(round, tRel) {
+      return Math.max(0, Math.min(100, (tRel / round.axisMax) * 100));
+    }
+
+    function statusChip(status) {
+      if (status === CueLatency.STATUS_CONFIRMED) return '<span class="chip ok">按时确认</span>';
+      if (status === CueLatency.STATUS_LATE) return '<span class="chip late">迟到确认（超时标记保留）</span>';
+      if (status === CueLatency.STATUS_TIMEOUT) return '<span class="chip timeout">超时未确认</span>';
+      return '<span class="chip">轮次结束时未确认</span>';
+    }
+
+    function roundBadges(round) {
+      const rev = round.revision > 1
+        ? `<span class="rev-badge">第 ${round.revision} 版（撤回修订）</span>`
+        : '<span class="rev-badge rev-initial">第 1 版</span>';
+      const end = round.endState === 'recalled'
+        ? '<span class="chip timeout">✂ 已撤回封存</span>'
+        : '<span class="chip ok">✅ 全员确认完成封存</span>';
+      return `${rev}${end}`;
+    }
+
+    // 单条岗位瀑布行
+    function rowHtml(round, row) {
+      const posFilter = positionFilter.value;
+      const dim = posFilter !== 'all' && !CueLatency.rowMatchesPosition(row, posFilter);
+      const rel = (t) => Math.max(0, t - round.startT);
+
+      // 有效等待条：active 实心段 + pause 斜纹段（视觉上暂停仍占墙钟位置）
+      const barSegs = row.segments.map((seg) => {
+        const left = pct(round, rel(seg.startT));
+        const width = Math.max(0, pct(round, rel(seg.endT)) - left);
+        return `<a class="lat-seg ${seg.kind} st-${row.status}" style="left:${left}%;width:${width}%"
+            href="${E(replayHref(row.jumpT))}" title="点击跳回复盘：${E(row.position)} 的${seg.kind === 'pause' ? '暂停区间（不计入有效等待）' : '有效等待'}"></a>`;
+      }).join('');
+
+      // 结果标记：迟到 / 超时在超时时刻保留红色警示标记
+      let endMarker = '';
+      if (row.status === CueLatency.STATUS_LATE && row.wasTimeout && round.timeoutEvent) {
+        endMarker = `<a class="lat-mark mk-timeout" style="left:${pct(round, rel(round.timeoutEvent.t))}%"
+          href="${E(replayHref(round.timeoutEvent.t))}" title="曾超时（标记保留），点击跳回复盘超时事件">▲</a>`;
+      }
+      if (row.status === CueLatency.STATUS_TIMEOUT && round.timeoutEvent) {
+        endMarker = `<a class="lat-mark mk-timeout" style="left:${pct(round, rel(round.timeoutEvent.t))}%"
+          href="${E(replayHref(round.timeoutEvent.t))}" title="超时未确认，点击跳回复盘超时事件">▲</a>`;
+      }
+      // 替岗标记：确认计入接管岗位，落在替岗发生时刻
+      let subMarker = '';
+      if (row.substituted) {
+        subMarker = `<a class="lat-mark mk-sub" style="left:${pct(round, rel(row.substitutedAt))}%"
+          href="${E(replayHref(row.substitutedAt))}" title="临时替岗：${E(row.origin)} → ${E(row.position)}（点击跳回复盘）">⇄</a>`;
+      }
+      // 重复确认小刻度
+      const dupMarks = row.duplicateEvents.map((d) =>
+        `<a class="lat-mark mk-dup" style="left:${pct(round, rel(d.t))}%"
+          href="${E(replayHref(d.t))}" title="重复确认（不改变状态），点击跳回复盘">⟳</a>`).join('');
+
+      const labelInner = row.substituted
+        ? `<span class="lat-sub-origin" title="原目标岗位">${E(row.origin)}</span><span class="lat-sub-arrow"> ⇄ </span><b title="接管岗位">${E(row.position)}</b>`
+        : `<b>${E(row.position)}</b>`;
+
+      const pauseNote = row.pausedMs > 0
+        ? `<div class="lat-val-sub">墙钟 ${fmtSec(row.wallMs)} · 扣暂停 ${fmtSec(row.pausedMs)}</div>`
+        : `<div class="lat-val-sub muted">墙钟 ${fmtSec(row.wallMs)}</div>`;
+
+      return `<div class="lat-row${dim ? ' is-dim' : ''}">
+        <div class="lat-lab">${labelInner}</div>
+        <div class="lat-track">${barSegs}${subMarker}${endMarker}${dupMarks}</div>
+        <div class="lat-val">
+          <div><b>${fmtSec(row.waitMs)}</b> ${statusChip(row.status)}</div>
+          ${pauseNote}
+        </div>
+      </div>`;
+    }
+
+    // 暂停区间道 + 时限参考线 + 坐标轴
+    function pauseTrackHtml(round) {
+      if (!round.pauses.length) return '<div class="lat-lab lat-pause-lab muted"></div><div class="lat-pause-track"></div>';
+      const bars = round.pauses.map((p, i) => {
+        const endT = p.endT != null ? p.endT : round.endT;
+        const left = pct(round, p.startT - round.startT);
+        const width = Math.max(0.4, pct(round, endT - round.startT) - left);
+        return `<a class="lat-pause-band" style="left:${left}%;width:${width}%"
+          href="${E(replayHref(p.startT))}" title="暂停 #${i + 1}：${E(p.reason || '（未填原因）')} ${fmtSec(endT - p.startT)}（已从等待时长扣除，点击跳回复盘）"></a>`;
+      }).join('');
+      return `<div class="lat-lab lat-pause-lab muted">暂停区间</div><div class="lat-pause-track">${bars}</div>`;
+    }
+
+    function rejectsHtml(round) {
+      const items = [];
+      // 暂停中确认被拒（不计入任何确认）
+      round.rejectedPauses.forEach((r) => {
+        items.push(`<a class="chip lat-reject" href="${E(replayHref(r.t))}" title="点击跳回复盘对应事件">⏸ ${E(r.position)} 暂停中确认被拒</a>`);
+      });
+      // 旧轮次迟到消息 / 旧定时器回调被拒（只标记，绝不污染新轮次）
+      round.stale.forEach((s) => {
+        const label = s.kind === 'stale-confirm'
+          ? `✖ ${s.position ? E(s.position) + ' ' : ''}旧轮次确认被拒`
+          : s.kind === 'stale-substitute'
+            ? '✖ 旧轮次替岗被拒'
+            : '✖ 旧定时器回调被拒';
+        items.push(`<a class="chip lat-reject" href="${E(replayHref(s.t))}" title="点击跳回复盘对应事件">${label}</a>`);
+      });
+      return items.length ? `<div class="lat-rejects">${items.join('')}</div>` : '';
+    }
+
+    function roundHtml(round) {
+      const deadlineRel = round.deadlineT - round.startT;
+      const deadlineLeft = pct(round, deadlineRel);
+      const s = round.stats;
+      const meta = [
+        `<span class="muted">${E(fmtClock(round.startIso))} 起</span>`,
+        s.pauses ? `<span class="chip late">⏸ 暂停 ${s.pauses} 次 · 扣除 ${fmtSec(round.pausedTotalMs)}</span>` : '',
+        s.substitutions ? `<span class="chip" style="background:#35274a;color:#c084fc">⇄ 替岗 ${s.substitutions} 次</span>` : '',
+        `<span class="muted">确认时限 ${fmtSec(round.budgetMs)}（有效）</span>`,
+      ].filter(Boolean).join('');
+
+      const rows = round.rows.map((r) => rowHtml(round, r)).join('');
+      const rejects = rejectsHtml(round);
+
+      return `<div class="lat-round${round.endState === 'recalled' ? ' is-recalled' : ''}">
+        <div class="lat-round-head">
+          ${roundBadges(round)}
+          ${round.reason ? `<span class="chip late">撤回原因：${E(round.reason)}</span>` : ''}
+          <span class="lat-round-meta">${meta}</span>
+        </div>
+        <div class="lat-round-text">${E(round.text)}</div>
+        <div class="lat-chart" style="--row-h:${ROW_H}px">
+          ${pauseTrackHtml(round)}
+          ${rows}
+          <div class="lat-scale-lab muted"></div>
+          <div class="lat-scale">
+            <span style="left:0%">0s</span>
+            <span style="left:${deadlineLeft}%">时限 ${fmtSec(deadlineRel)}</span>
+            <span style="left:100%">${fmtSec(round.axisMax)}</span>
+          </div>
+          <div class="lat-deadline" style="left:${deadlineLeft}%" title="有效确认时限（初始时限 + 暂停补偿）"></div>
+        </div>
+        ${rejects}
+      </div>`;
+    }
+
+    function cueCardHtml(cue) {
+      const t = cue.totals;
+      const resultChip = t.finalResult === 'ok'
+        ? '<span class="chip ok">最终：全员按时</span>'
+        : t.finalResult === 'late'
+          ? '<span class="chip late">最终：含迟到确认</span>'
+          : '<span class="chip timeout">最终：仍有超时</span>';
+      const featChips = [
+        t.revisions ? `<span class="chip late">修订 ${t.revisions} 次</span>` : '',
+        cue.recallReasons.map((r) => `<span class="chip late">原因：${E(r)}</span>`).join(''),
+        t.hasPause ? `<span class="chip late">暂停 ${t.pauses} 次 · 共扣除 ${fmtSec(t.pausedTotalMs)}</span>` : '',
+        t.hasSubstitution ? `<span class="chip" style="background:#35274a;color:#c084fc">替岗 ${t.substitutions} 次</span>` : '',
+        t.timeouts ? `<span class="chip timeout">超时标记 ${t.timeouts} 岗次</span>` : '',
+        t.lateConfirms ? `<span class="chip late">迟到确认 ${t.lateConfirms} 岗次</span>` : '',
+        t.stale ? `<span class="chip lat-reject">旧轮次拒绝 ${t.stale} 条</span>` : '',
+        `<span class="muted">最长有效等待 ${fmtSec(t.maxWaitMs)}</span>`,
+      ].filter(Boolean).join('');
+
+      // 轮次按版本顺序展示（第 1 版 → 修订版），撤回轮次红色左边框
+      const rounds = cue.rounds.map(roundHtml).join('');
+      return `<section class="card lat-cue">
+        <div class="lat-cue-head">
+          <h2><span class="chip" style="background:#1e3350;color:#9cc2ff">#${cue.seq}</span> ${E(cue.text)}</h2>
+          <div>${resultChip}${featChips}</div>
+        </div>
+        <div class="muted lat-cue-targets">目标岗位：${cue.targets.map(E).join('、')}</div>
+        ${rounds}
+      </section>`;
+    }
+
+    // ---------------------------------------------------------------------
+    // 渲染
+    // ---------------------------------------------------------------------
+    function renderWarnings() {
+      // 坏行告警随复盘单场接口返回；诊断基于其余有效事件重建
+      const warnings = rawPayload && rawPayload.warnings || [];
+      if (!warnings.length) {
+        warnBox.classList.remove('show');
+        warnBox.innerHTML = '';
+        return;
+      }
+      warnBox.classList.add('show');
+      warnBox.innerHTML = `⚠️ 本场事件日志中检测到 <b>${warnings.length}</b> 行损坏记录，已逐行跳过（诊断基于其余有效事件重建）：` +
+        warnings.slice(0, 5).map((w) =>
+          `<span class="badline">第 ${w.line} 行：${E(w.reason)}${w.raw ? ` — ${E(w.raw)}` : ''}</span>`
+        ).join('') + (warnings.length > 5 ? `<span class="muted">…其余 ${warnings.length - 5} 行略</span>` : '');
+    }
+
+    function renderSummary() {
+      const s = analysis.summary;
+      const chips = [
+        `<span class="chip" style="background:#1e3350;color:#9cc2ff">口令 ${s.cueCount} 条</span>`,
+        `<span class="chip">确认轮次 ${s.roundCount} 个（修订轮次 ${s.revisionCount}）</span>`,
+        `<span class="chip ok">按时 ${s.confirmed}</span>`,
+        `<span class="chip late">迟到 ${s.late}</span>`,
+        `<span class="chip timeout">超时未确认 ${s.timeout}</span>`,
+        s.pending ? `<span class="chip">撤回时未确认 ${s.pending}</span>` : '',
+        s.pauses ? `<span class="chip late">暂停 ${s.pauses} 次 · 共扣除 ${fmtSec(s.pausedTotalMs)}</span>` : '',
+        s.substitutions ? `<span class="chip" style="background:#35274a;color:#c084fc">替岗 ${s.substitutions} 次</span>` : '',
+        s.rejectedPauses ? `<span class="chip lat-reject">暂停中确认被拒 ${s.rejectedPauses} 次</span>` : '',
+        s.stale ? `<span class="chip lat-reject">旧轮次拒绝 ${s.stale} 条</span>` : '',
+        `<span class="muted">最长有效等待 ${fmtSec(s.maxWaitMs)}（已扣暂停）</span>`,
+      ].filter(Boolean).join('');
+      const sess = analysis.session;
+      summaryBox.innerHTML = `<section class="card lat-summary">
+        <div class="lat-session-head">
+          <b>${E(fmtClock(sess.startedAt))} → ${E(fmtClock(sess.finishedAt))}</b>
+          <span class="muted">${sess.cueCount} 条口令 · 时长 ${E(fmtDuration(sess.durationMs))} · 确认时限 ${analysis.timeoutSec}s
+          · <span title="${E(sess.fileId)}">日志 ${E(sess.fileId.slice(0, 8))}… 第 ${sess.runId + 1} 段</span></span>
+          <a href="${E(replayHref(null))}" target="_blank" rel="noopener">↗ 在复盘中打开本场</a>
+        </div>
+        <div class="lat-summary-chips">${chips}</div>
+      </section>`;
+    }
+
+    function render() {
+      if (!analysis) return;
+      positionFilter.disabled = false;
+      resultFilter.disabled = false;
+      renderWarnings();
+      renderSummary();
+
+      const pos = positionFilter.value;
+      const res = resultFilter.value;
+      // 结果筛选决定口令卡片的显隐；岗位筛选不隐藏卡片，只把非所选岗位行
+      // 暗色保留用于对照（行内渲染根据岗位匹配加 is-dim）
+      const cueCards = analysis.cues
+        .filter((cue) => CueLatency.cueMatchesResult(cue, res));
+
+      cueList.innerHTML = cueCards.map(cueCardHtml).join('');
+
+      const totalCues = analysis.cues.length;
+      if (!cueCards.length) {
+        emptyHint.style.display = '';
+        emptyHint.innerHTML = '<div class="muted">当前筛选条件下没有匹配的口令。</div>';
+      } else {
+        emptyHint.style.display = 'none';
+      }
+      filterHint.textContent = pos === 'all' && res === 'all'
+        ? ''
+        : `结果筛选命中 ${cueCards.length} / ${totalCues} 条口令${pos !== 'all' ? '；岗位「' + pos + '」高亮，其余岗位行以暗色保留对照' : ''}`;
+    }
+
+    let rawPayload = null;
+
+    async function loadSession(ref) {
+      const [f, ...rParts] = String(ref).split('/');
+      const r = rParts.join('/');
+      fileId = f;
+      runId = Number(r);
+      filterBar.style.display = 'none';
+      cueList.innerHTML = '';
+      summaryBox.innerHTML = '';
+      warnBox.classList.remove('show');
+      emptyHint.style.display = 'none';
+      let payload;
+      try {
+        payload = await (await fetch(`/api/replay/sessions/${encodeURIComponent(f)}/${encodeURIComponent(r)}`)).json();
+      } catch {
+        emptyHint.style.display = '';
+        emptyHint.innerHTML = '<span style="color:#ff9c9c">场次数据加载失败，请确认服务已启动</span>';
+        return;
+      }
+      if (payload.error) {
+        emptyHint.style.display = '';
+        emptyHint.innerHTML = `<span style="color:#ff9c9c">${E(payload.error)}</span>`;
+        return;
+      }
+      rawPayload = payload;
+      analysis = CueLatency.analyzeSession(payload);
+
+      positionFilter.innerHTML = '<option value="all">全部岗位</option>' +
+        analysis.positions.map((p) => `<option value="${E(p)}">${E(p)}</option>`).join('');
+      const params = new URLSearchParams(location.search);
+      const presetPos = params.get('position');
+      if (presetPos && analysis.positions.includes(presetPos)) positionFilter.value = presetPos;
+      else positionFilter.value = 'all';
+
+      filterBar.style.display = '';
+      openReplay.href = replayHref(null);
+      openReplay.style.display = '';
+      history.replaceState(null, '', `latency.html?file=${encodeURIComponent(f)}&run=${encodeURIComponent(r)}` +
+        (positionFilter.value !== 'all' ? `&position=${encodeURIComponent(positionFilter.value)}` : ''));
+      render();
+    }
+
+    positionFilter.addEventListener('change', render);
+    resultFilter.addEventListener('change', render);
+    sessionSelect.addEventListener('change', () => {
+      if (sessionSelect.value) loadSession(sessionSelect.value);
+    });
+
+    async function init() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessions = payload.sessions || [];
+      if (!sessions.length) {
+        sessLoading.innerHTML = '<span style="color:#f0c169">data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次。</span>';
+        return;
+      }
+      sessLoading.style.display = 'none';
+      sessionSelect.innerHTML = sessions.map((s) =>
+        `<option value="${E(refValue(s))}">${E(optionLabel(s))}</option>`).join('');
+      sessionSelect.disabled = false;
+
+      const params = new URLSearchParams(location.search);
+      const presetFile = params.get('file');
+      const presetRun = params.get('run');
+      const presetRef = presetFile && presetRun !== null ? `${presetFile}/${presetRun}` : '';
+      if (presetRef && sessions.some((s) => refValue(s) === presetRef)) {
+        sessionSelect.value = presetRef;
+        loadSession(presetRef);
+      } else {
+        loadSession(refValue(sessions[0]));
+      }
+    }
+
+    init();
+  })();
+  </script>
+</body>
+</html>

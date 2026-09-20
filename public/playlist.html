@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>复盘播放清单 · 连续回放 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎼 复盘播放清单（只读）</h1>
+    <nav>
+      <a href="annotations.html">复盘批注簿</a>
+      <a href="replay.html">演出复盘</a>
+      <a href="compare.html">场次对比</a>
+      <a href="latency.html">确认延迟诊断</a>
+      <a href="archive.html">复盘归档</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main class="pl-main">
+    <!-- 空清单 / 加载中 -->
+    <section class="card" id="emptyCard" style="display:none">
+      <h2>播放清单为空</h2>
+      <div class="muted" style="line-height:1.9">
+        清单只保存在本浏览器的 IndexedDB。请到 <a href="annotations.html">复盘批注簿</a> 从<b>有效批注</b>勾选区间加入清单并拖拽排序，再回到本页播放。
+      </div>
+    </section>
+
+    <section id="playerWrap" style="display:none">
+      <!-- 播放前重定位：跳过条目集中列明原因 -->
+      <div class="card" id="resolveCard">
+        <div class="row" style="align-items:center">
+          <h2 style="flex:1;margin:0">播放前重定位</h2>
+          <button class="secondary mini" id="relocateBtn" type="button">↻ 重新定位</button>
+        </div>
+        <div id="resolveStatus" class="muted" style="margin-top:8px"></div>
+        <div id="skippedBox" class="pl-skipped" style="display:none">
+          <div class="pl-skipped-head">以下条目已自动跳过，不进入虚拟时间轴（批注原文不受影响）：</div>
+          <div id="skippedList"></div>
+          <div class="row" style="margin-top:8px">
+            <button class="secondary mini" id="removeSkippedBtn" type="button">从清单移除全部跳过项</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="segmentsCardWrap">
+        <div class="card">
+          <h2>连续回放（跨场次自动切换）</h2>
+          <div class="pl-seg-context" id="segContext"></div>
+
+          <!-- 虚拟时间轴：各段按累计区间时长首尾拼接，边界处为场次切换刻度 -->
+          <div class="timeline-wrap">
+            <div class="timeline pl-timeline" id="timeline" title="点击 / 拖动虚拟时间轴（按累计区间时长映射回各场次原始时刻）">
+              <div class="playhead" id="playhead"></div>
+            </div>
+            <div class="timeline-scale"><span>0:00</span><span id="scaleEnd"></span></div>
+          </div>
+
+          <div class="transport">
+            <button id="playBtn">▶ 播放</button>
+            <button class="secondary" id="restartBtn">⏮ 回到起点</button>
+            <span class="muted">速度</span>
+            <button class="mini speed-btn secondary" data-speed="1" aria-pressed="true">1×</button>
+            <button class="mini speed-btn secondary" data-speed="2" aria-pressed="false">2×</button>
+            <button class="mini speed-btn secondary" data-speed="4" aria-pressed="false">4×</button>
+            <span class="time-readout"><span id="timeNow">0:00.0</span> / <span id="timeEnd">0:00.0</span></span>
+          </div>
+          <div class="replay-kbd" style="margin-top:8px">
+            空格键播放 / 暂停，← / → 虚拟时间轴前后跳转 1 秒；播放头恰好落在两段边界时进入后一段。重叠区间按清单顺序分别播放，不做合并。
+          </div>
+        </div>
+
+        <!-- 播放段概览：点击任一段跳到其虚拟起点 -->
+        <div class="card">
+          <h2>播放段顺序（<span id="segTotal"></span>）</h2>
+          <div id="segOverview" class="pl-seg-list"></div>
+        </div>
+
+        <div class="replay-state-grid">
+          <div class="card">
+            <h2>当前现场（映射到原场次重放）</h2>
+            <div id="statePanel"></div>
+          </div>
+          <div class="card">
+            <h2>口令序列（当前场次）</h2>
+            <div id="cuePanel"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>当前段事件（本场原始时刻）</h2>
+          <div class="muted" style="margin-bottom:8px" id="segMetaLine"></div>
+          <div class="replay-event-list" id="eventList"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="common.js"></script>
+  <script src="replay.js"></script>
+  <script src="annotations.js"></script>
+  <script src="playlist.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：只发起复盘只读 GET 请求，不创建 WebSocket；清单与批注仅读写
+    // 本浏览器 IndexedDB，不调用任何服务端写接口。
+    const esc = CueClient.escapeHtml;
+
+    const emptyCard = document.getElementById('emptyCard');
+    const playerWrap = document.getElementById('playerWrap');
+    const relocateBtn = document.getElementById('relocateBtn');
+    const resolveStatus = document.getElementById('resolveStatus');
+    const skippedBox = document.getElementById('skippedBox');
+    const skippedList = document.getElementById('skippedList');
+    const removeSkippedBtn = document.getElementById('removeSkippedBtn');
+    const segContext = document.getElementById('segContext');
+    const timelineEl = document.getElementById('timeline');
+    const playheadEl = document.getElementById('playhead');
+    const scaleEndEl = document.getElementById('scaleEnd');
+    const playBtn = document.getElementById('playBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const timeNowEl = document.getElementById('timeNow');
+    const timeEndEl = document.getElementById('timeEnd');
+    const segOverview = document.getElementById('segOverview');
+    const segTotal = document.getElementById('segTotal');
+    const statePanel = document.getElementById('statePanel');
+    const cuePanel = document.getElementById('cuePanel');
+    const eventList = document.getElementById('eventList');
+    const segMetaLine = document.getElementById('segMetaLine');
+
+    const WARN_EVENTS = new Set([
+      'cue-timeout', 'cue-recalled', 'cue-paused', 'confirm-duplicate', 'confirm-late',
+      'paused-confirm-rejected', 'stale-confirm-ignored', 'stale-timeout-ignored',
+      'stale-substitute-ignored', 'lease-expired', 'lease-acquire-denied',
+      'lease-op-denied', 'stale-lease-heartbeat-ignored', 'draft-save-conflict',
+    ]);
+
+    let annotations = [];
+    let playlist = CuePlaylist.emptyDoc();
+    let resolving = null;       // 进行中的重定位 Promise（播放前等待）
+    let segmentsRaw = [];       // resolvePlaylist 返回（不带 offset）
+    let segments = [];          // withOffsets 后的播放段
+    let skipped = [];
+    const sessionData = new Map(); // "fileId/runId" -> 复盘接口 payload
+    let vt = 0;                 // 虚拟时间轴位置（毫秒）
+    let forceIndex = null;      // 显式定位的段（零长段跳转）；正常播放后立即解除
+    let playing = false;
+    let speed = 1;
+    let rafId = null;
+    let lastFrameAt = 0;
+    let lastSegIndex = -1;
+
+    // ---------------------------------------------------------------------
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      if (!Number.isFinite(d.getTime())) return '—';
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtT(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sign = ms < 0 ? '-' : '';
+      ms = Math.abs(ms);
+      const m = Math.floor(ms / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      const tenth = Math.floor((ms % 1000) / 100);
+      return `${sign}${m}:${String(s).padStart(2, '0')}.${tenth}`;
+    }
+    function refKey(fileId, runId) { return `${fileId}/${runId}`; }
+
+    function detailText(ev) {
+      const d = ev.detail || {};
+      switch (ev.event) {
+        case 'cue-started':
+        case 'cue-resent':
+          return `#${d.seq}${ev.event === 'cue-resent' ? ` v${d.revision}` : ''} ${d.text}` +
+            (d.reason ? `（原因：${d.reason}）` : '') + ` → [${(d.targets || []).join('、')}]`;
+        case 'cue-recalled':
+          return `#${d.seq} v${d.oldRevision}→v${d.newRevision}：${d.reason}，新口令「${d.newText}」`;
+        case 'cue-completed': return `#${d.seq} 全员确认完成`;
+        case 'cue-timeout': return `#${d.seq} 超时未确认：${(d.missing || []).join('、')}`;
+        case 'confirm':
+        case 'confirm-late':
+        case 'confirm-duplicate': return `#${d.seq} ${d.position}${ev.event === 'confirm-late' ? '（迟到）' : ev.event === 'confirm-duplicate' ? '（重复）' : ''}`;
+        case 'position-substituted': return `#${d.seq} ${d.from} → ${d.to}`;
+        case 'cue-paused': return `#${d.seq} 原因：${d.reason}，冻结余量 ${d.remainingSec}s`;
+        case 'cue-resumed': return `#${d.seq} 恢复，余量 ${d.remainingSec}s`;
+        case 'paused-confirm-rejected': return `#${d.seq} ${d.position} 暂停中确认被拒`;
+        case 'stale-confirm-ignored': return `#${d.seq} ${d.position} 旧轮次确认被拒`;
+        case 'stale-timeout-ignored': return `#${d.seq} 旧定时器回调被拒`;
+        case 'session-start': return '本场开始';
+        case 'sequence-finished': return '全部口令完成';
+        default:
+          return Object.entries(d).map(([k, v]) =>
+            `${k}=${Array.isArray(v) ? v.join('/') : (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v))}`).join(' ');
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 场次加载（只读 GET，带缓存；供重定位与播放渲染共用）
+    // ---------------------------------------------------------------------
+    async function loadSession(fileId, runId) {
+      const key = refKey(fileId, runId);
+      if (sessionData.has(key)) {
+        const p = sessionData.get(key);
+        if (p && p.events) return { ok: true, events: p.events };
+      }
+      try {
+        const resp = await fetch(`/api/replay/sessions/${encodeURIComponent(fileId)}/${encodeURIComponent(runId)}`);
+        if (resp.status === 404 || resp.status === 400) {
+          return { ok: false, reason: '场次日志找不到（文件或段落不存在，可能已删除）' };
+        }
+        const payload = await resp.json();
+        if (payload.error) return { ok: false, reason: `场次读取失败：${payload.error}` };
+        sessionData.set(key, payload);
+        return { ok: true, events: payload.events };
+      } catch {
+        return { ok: false, reason: '场次日志读取失败（服务不可用）' };
+      }
+    }
+
+    async function getPayload(fileId, runId) {
+      const key = refKey(fileId, runId);
+      if (!sessionData.has(key)) await loadSession(fileId, runId);
+      return sessionData.get(key) || null;
+    }
+
+    // ---------------------------------------------------------------------
+    // 播放前重定位（重新定位每条批注；失效 / 日志缺失自动跳过并列明原因）
+    // ---------------------------------------------------------------------
+    async function runResolve() {
+      setPlaying(false);
+      forceIndex = null;
+      resolveStatus.innerHTML = '正在按事件指纹重新定位清单中的每条批注…';
+      skippedBox.style.display = 'none';
+      const result = await CuePlaylist.resolvePlaylist(
+        playlist.entries, annotations, (fileId, runId) => loadSession(fileId, runId)
+      );
+      segmentsRaw = result.segments;
+      skipped = result.skipped;
+      segments = CuePlaylist.withOffsets(segmentsRaw);
+      renderResolvePanel();
+      buildPlayer();
+    }
+
+    function annotationById(id) { return annotations.find((a) => a.id === id); }
+    function sessionLabelOf(seg) {
+      const p = sessionData.get(refKey(seg.fileId, seg.runId));
+      const s = p && p.session;
+      if (s) return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${seg.fileId.slice(0, 8)}… #${seg.runId + 1}`;
+      return `${seg.fileId.slice(0, 8)}… #${seg.runId + 1}`;
+    }
+
+    function renderResolvePanel() {
+      const totalN = playlist.entries.length;
+      resolveStatus.innerHTML = segments.length
+        ? `重定位完成：清单 <b>${totalN}</b> 条，可播放 <b>${segments.length}</b> 段，虚拟时间轴总时长 <b>${fmtT(CuePlaylist.totalDuration(segments))}</b>。`
+        : `清单 <b>${totalN}</b> 条，但没有可播放段（全部被跳过）。请回到批注簿调整清单。`;
+      if (!skipped.length) { skippedBox.style.display = 'none'; return; }
+      skippedBox.style.display = '';
+      skippedList.innerHTML = skipped.map((sk) => {
+        const ann = sk.annotation || annotationById(sk.entryId);
+        const where = ann
+          ? `<span class="muted">${esc(sessionLabelOf({ fileId: ann.sessionRef.fileId, runId: Number(ann.sessionRef.runId) }))}</span>` : '';
+        const text = ann ? esc(ann.text || '（无批注文本）') : '<span class="muted">批注原文已不可见</span>';
+        return `<div class="pl-skipped-row">
+          <span class="ann-badge invalid">✖ 跳过</span>
+          ${where}
+          <span>${text}</span>
+          <span class="pl-skip-reason">原因：${esc(sk.reason)}</span>
+        </div>`;
+      }).join('');
+    }
+
+    removeSkippedBtn.addEventListener('click', async () => {
+      if (!skipped.length) return;
+      if (!confirm(`从清单移除全部 ${skipped.length} 个跳过项？批注本身不会被删除。`)) return;
+      const skipIds = new Set(skipped.map((s) => s.entryId));
+      playlist = await CuePlaylist.mutate((doc) => doc.entries.filter((e) => !skipIds.has(e.id)));
+      await runResolve();
+    });
+    relocateBtn.addEventListener('click', () => { resolving = runResolve(); return resolving; });
+
+    // ---------------------------------------------------------------------
+    // 虚拟时间轴构建
+    // ---------------------------------------------------------------------
+    const SEG_COLORS = ['#2f6fed', '#8b5cf6', '#0f9d8f', '#b5651d', '#4caf7d', '#d9489a', '#5b8def'];
+    function segColor(i) { return SEG_COLORS[i % SEG_COLORS.length]; }
+
+    function buildTimeline() {
+      timelineEl.querySelectorAll('.pl-seg-band, .pl-boundary, .marker').forEach((el) => el.remove());
+      const total = Math.max(1, CuePlaylist.totalDuration(segments));
+
+      // 段带：按累计区间时长首尾拼接；重叠区间各自一条带（不合并）
+      segments.forEach((seg, i) => {
+        const left = (seg.offsetStart / total) * 100;
+        const width = Math.max(seg.durationMs === 0 ? 0.8 : 0, (seg.durationMs / total) * 100);
+        const ann = annotationById(seg.entryId);
+        const band = document.createElement('div');
+        band.className = 'pl-seg-band';
+        band.style.cssText = `left:${left}%;width:${width}%;background:${segColor(i)}33;border-top-color:${segColor(i)}`;
+        band.title = `第 ${i + 1} 段 ｜ ${sessionLabelOf(seg)}\n区间 +${fmtT(seg.startT)} → +${fmtT(seg.endT)}（${fmtT(seg.durationMs)}）\n${ann ? ann.text : ''}`;
+        band.addEventListener('mousedown', (e) => { e.stopPropagation(); jumpToSegment(i); });
+        timelineEl.appendChild(band);
+      });
+
+      // 场次切换边界刻度（相邻段属不同场次时加深色刻度线）
+      segments.forEach((seg, i) => {
+        if (i === 0) return;
+        const prev = segments[i - 1];
+        const cross = prev.fileId !== seg.fileId || prev.runId !== seg.runId;
+        if (!cross) return;
+        const line = document.createElement('div');
+        line.className = 'pl-boundary';
+        line.style.left = `${(seg.offsetStart / total) * 100}%`;
+        line.title = `⚡ 跨场次切换：进入 ${sessionLabelOf(seg)}`;
+        timelineEl.appendChild(line);
+      });
+
+      // 当前段的事件标记（映射到虚拟坐标；只画当前段，跨段切换后重建）
+      renderTimelineMarkers();
+
+      scaleEndEl.textContent = fmtT(total);
+      timeEndEl.textContent = fmtT(total);
+    }
+
+    // 当前段事件标记：虚拟坐标 = 段起点偏移 + 事件在段内的原始时刻差
+    function renderTimelineMarkers() {
+      timelineEl.querySelectorAll('.marker').forEach((el) => el.remove());
+      const loc = CuePlaylist.locate(segments, vt, forceIndex);
+      if (!loc) return;
+      const payload = sessionData.get(refKey(loc.seg.fileId, loc.seg.runId));
+      if (!payload) return;
+      const total = Math.max(1, CuePlaylist.totalDuration(segments));
+      payload.events.forEach((ev) => {
+        if (ev.t < loc.seg.startT || ev.t > loc.seg.endT) return;
+        const mk = document.createElement('div');
+        mk.className = 'marker';
+        const vpos = loc.seg.offsetStart + (ev.t - loc.seg.startT);
+        mk.style.left = `${Math.max(0, Math.min(100, (vpos / total) * 100))}%`;
+        mk.style.background = WARN_EVENTS.has(ev.event) ? '#ff7676' : '#8ab4ff';
+        mk.title = `+${fmtT(ev.t)} ${Replay.eventLabel(ev.event)}：${detailText(ev)}`;
+        mk.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          seekVirtual(loc.seg.offsetStart + (ev.t - loc.seg.startT));
+        });
+        timelineEl.appendChild(mk);
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // 段概览列表
+    // ---------------------------------------------------------------------
+    function renderOverview(activeIndex) {
+      segTotal.textContent = `${segments.length} 段 / ${fmtT(CuePlaylist.totalDuration(segments))}`;
+      segOverview.innerHTML = segments.map((seg, i) => {
+        const ann = annotationById(seg.entryId);
+        const cross = i > 0 && (segments[i - 1].fileId !== seg.fileId || segments[i - 1].runId !== seg.runId);
+        return `<div class="pl-seg-row ${i === activeIndex ? 'active' : ''}" data-seg="${i}">
+          <span class="pl-seg-no">${i + 1}</span>
+          <span class="pl-seg-color" style="background:${segColor(i)}"></span>
+          <span class="pl-seg-main">
+            <span class="pl-seg-session">${cross ? '⚡ ' : ''}${esc(sessionLabelOf(seg))}</span>
+            <span class="pl-cand-range">+${fmtT(seg.startT)} → +${fmtT(seg.endT)}（${fmtT(seg.durationMs)}）</span>
+            <span class="pl-cand-text">${esc((ann && ann.text) || '（无批注文本）')}</span>
+          </span>
+          <a class="pl-seg-open" target="_blank" title="在原场次复盘页打开区间起点"
+             href="replay.html?file=${encodeURIComponent(seg.fileId)}&run=${encodeURIComponent(seg.runId)}&t=${encodeURIComponent(seg.startT)}">原场次复盘 ↗</a>
+        </div>`;
+      }).join('');
+      segOverview.querySelectorAll('.pl-seg-row').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('a')) return;
+          jumpToSegment(Number(row.dataset.seg));
+        });
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // 当前现场渲染：定位虚拟时刻 -> 映射原场次原始时刻 -> foldUntil
+    // ---------------------------------------------------------------------
+    function renderState() {
+      const loc = CuePlaylist.locate(segments, vt, forceIndex);
+      if (!loc) return;
+      const seg = loc.seg;
+      const payload = sessionData.get(refKey(seg.fileId, seg.runId));
+      const events = payload ? payload.events : [];
+      const s = Replay.foldUntil(events, loc.localT);
+      const view = Replay.viewOf(s);
+
+      const phaseText = { idle: '待开始', active: '口令进行中', between: '口令已完成（待推进）', done: '全场已结束' }[s.phase];
+      const phaseCls = { idle: 'replay-phase-idle', active: 'replay-phase-active', between: 'replay-phase-active', done: 'replay-phase-done' }[s.phase];
+
+      let cueHtml = '';
+      if (s.phase === 'idle') {
+        cueHtml = '<div class="big-cue replay-phase-idle" style="font-size:22px;padding:24px 8px">等待演出开始…</div>';
+      } else if (s.phase === 'done') {
+        cueHtml = '<div class="big-cue replay-phase-done" style="font-size:22px;padding:24px 8px">✅ 全部口令已完成，本场结束</div>';
+      } else if (s.seq != null) {
+        const revBadge = s.revision > 1
+          ? `<span class="rev-badge">第 ${s.revision} 版（撤回修订）</span><div class="rev-reason">撤回原因：${esc(s.reason || '')}</div>`
+          : '<span class="rev-badge rev-initial">第 1 版</span>';
+        const pauseHtml = s.paused
+          ? `<div class="status-banner warn show">⏸ 已暂停：${esc(s.pauseReason || '')}</div>` : '';
+        cueHtml = `
+          <div class="big-cue">
+            <span class="cue-seq">第 ${s.seq} / ${payload.sequence.length} 条</span>
+            ${esc(s.text)}
+          </div>
+          <div style="text-align:center">${revBadge}</div>
+          ${pauseHtml}
+          <div class="replay-chips-line">
+            ${view.confirmed.map((c) =>
+              `<span class="chip ${c.late ? 'late' : 'ok'}">${esc(c.position)} · ${c.late ? '迟到确认' : '已确认'}</span>`).join('')}
+            ${view.timedOut.map((t) => `<span class="chip timeout">${esc(t)} · 超时未确认</span>`).join('')}
+            ${view.pending.map((t) => `<span class="chip">${esc(t)} · 待确认</span>`).join('')}
+          </div>`;
+        const subs = Object.entries(s.substitutions);
+        if (subs.length) {
+          cueHtml += `<div style="margin-top:8px">${subs.map(([from, v]) =>
+            `<span class="chip"><span class="replay-cue-sub">${esc(from)}</span> → ${esc(v.substitute)} 临时替岗</span>`).join('')}</div>`;
+        }
+      }
+
+      let attemptsHtml = '';
+      if (s.attempts && s.attempts.length) {
+        attemptsHtml = '<h2 style="margin-top:18px">历史轮次（只读封存）</h2>' +
+          CueClient.renderAttempts({ attempts: s.attempts.slice().reverse() }, { targets: s.targets });
+      }
+
+      statePanel.innerHTML = `
+        <div class="row" style="margin-bottom:8px">
+          <span class="${phaseCls}" style="flex:0 0 auto;font-weight:600">● ${phaseText}</span>
+          <span class="muted" style="text-align:right">第 ${loc.index + 1}/${segments.length} 段 · 原场次 +${fmtT(loc.localT)}</span>
+        </div>
+        ${cueHtml}${attemptsHtml}`;
+
+      cuePanel.innerHTML = payload.sequence.map((c) => {
+        const r = s.results[c.seq];
+        let cls = '', mark = '○';
+        if (r === 'completed') { cls = 'ok'; mark = '✅'; }
+        else if (r === 'active') { cls = ''; mark = '▶'; }
+        return `<div style="padding:6px 0;border-bottom:1px solid #2c3040">
+          <span class="chip ${cls}">${mark} #${c.seq}</span>
+          <span style="${r === 'active' ? 'color:#8ab4ff' : ''}">${esc(c.text)}</span>
+          <span class="muted" style="font-size:12px">→ ${c.targets.map(esc).join('、')}</span>
+        </div>`;
+      }).join('');
+    }
+
+    // 当前段事件列表（只展示区间覆盖的事件，按本场原始时刻）
+    function renderEventList() {
+      const loc = CuePlaylist.locate(segments, vt, forceIndex);
+      if (!loc) return;
+      const payload = sessionData.get(refKey(loc.seg.fileId, loc.seg.runId));
+      if (!payload) { eventList.innerHTML = '<div class="muted">场次数据缺失。</div>'; return; }
+      const rows = [];
+      payload.events.forEach((ev) => {
+        if (ev.t < loc.seg.startT || ev.t > loc.seg.endT) return;
+        const applied = ev.t <= loc.localT;
+        rows.push({ ev, applied, vpos: loc.seg.offsetStart + (ev.t - loc.seg.startT) });
+      });
+      eventList.innerHTML = rows.map(({ ev, applied, vpos }) =>
+        `<div class="replay-event-row ${WARN_EVENTS.has(ev.event) ? 'is-warn' : ''} ${applied ? 'applied' : ''}" data-vt="${vpos}">` +
+        `<span class="replay-event-t">+${fmtT(ev.t)}</span>` +
+        `<span class="replay-event-name">${esc(Replay.eventLabel(ev.event))}</span>` +
+        `<span class="replay-event-detail">${esc(detailText(ev))}</span></div>`
+      ).join('') || '<div class="muted">本段无事件。</div>';
+      eventList.querySelectorAll('.replay-event-row').forEach((row) => {
+        row.addEventListener('click', () => seekVirtual(Number(row.dataset.vt)));
+      });
+      const appliedEl = eventList.querySelector('.replay-event-row.applied:last-of-type');
+      if (playing && appliedEl) appliedEl.scrollIntoView({ block: 'nearest' });
+    }
+
+    function renderSegContext(activeIndex) {
+      const loc = CuePlaylist.locate(segments, vt, forceIndex);
+      if (!loc) { segContext.innerHTML = ''; return; }
+      const seg = loc.seg;
+      const ann = annotationById(seg.entryId);
+      segContext.innerHTML = `
+        <div class="pl-ctx-line">
+          <span class="pl-ctx-no" style="background:${segColor(loc.index)}">第 ${loc.index + 1} / ${segments.length} 段</span>
+          <span><b>${esc(sessionLabelOf(seg))}</b></span>
+          <span class="muted">区间 +${fmtT(seg.startT)} → +${fmtT(seg.endT)}（${fmtT(seg.durationMs)}）</span>
+          <a class="pl-ctx-jump" href="annotations.html">在批注簿调整清单</a>
+        </div>
+        <div class="pl-ctx-text">${esc((ann && ann.text) || '（无批注文本）')}
+          <span class="muted">${(ann && ann.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</span>
+        </div>`;
+      segMetaLine.textContent = `本段映射到「${sessionLabelOf(seg)}」的区间 +${fmtT(seg.startT)} → +${fmtT(seg.endT)}；点击事件行跳到对应虚拟时刻。`;
+      segOverview.querySelectorAll('.pl-seg-row').forEach((row, i) =>
+        row.classList.toggle('active', i === loc.index));
+    }
+
+    function renderPlayhead() {
+      const total = Math.max(1, CuePlaylist.totalDuration(segments));
+      playheadEl.style.left = `${Math.max(0, Math.min(100, (vt / total) * 100))}%`;
+      timeNowEl.textContent = fmtT(vt);
+    }
+
+    function render() {
+      const loc = CuePlaylist.locate(segments, vt, forceIndex);
+      if (!loc) return;
+      if (loc.index !== lastSegIndex) {
+        // 跨场次（或跨段）切换：重建当前段标记；现场按新场次 fold
+        if (lastSegIndex >= 0) {
+          const prev = segments[lastSegIndex];
+          const now = segments[loc.index];
+          const cross = prev.fileId !== now.fileId || prev.runId !== now.runId;
+          if (cross) segContext.animate(
+            [{ backgroundColor: 'rgba(240,193,105,0.25)' }, { backgroundColor: 'transparent' }],
+            { duration: 600 });
+        }
+        lastSegIndex = loc.index;
+        renderTimelineMarkers();
+      }
+      renderSegContext();
+      renderState();
+      renderEventList();
+      renderPlayhead();
+    }
+
+    // ---------------------------------------------------------------------
+    // 播放控制：dt * speed 推进虚拟时间；映射与跨段切换全部在渲染期完成
+    // ---------------------------------------------------------------------
+    function setPlaying(v) {
+      if (v && !segments.length) return;
+      playing = v;
+      playBtn.textContent = playing ? '⏸ 暂停' : '▶ 播放';
+      if (playing) {
+        const total = CuePlaylist.totalDuration(segments);
+        if (vt >= total) { vt = 0; forceIndex = null; }
+        // 开始正常播放即解除零长段的显式定位（让边界规则接管）
+        forceIndex = null;
+        lastFrameAt = performance.now();
+        const tick = (now) => {
+          if (!playing) return;
+          const dt = now - lastFrameAt;
+          lastFrameAt = now;
+          vt = Math.min(total, vt + dt * speed);
+          render();
+          if (vt >= total) { setPlaying(false); return; }
+          rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+      } else if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    }
+
+    function seekVirtual(t) {
+      const total = CuePlaylist.totalDuration(segments);
+      vt = Math.max(0, Math.min(total, Number(t) || 0));
+      forceIndex = null; // 用户主动 seek 后恢复「边界进入后一段」的默认规则
+      render();
+    }
+
+    function jumpToSegment(i) {
+      const seg = segments[i];
+      if (!seg) return;
+      setPlaying(false);
+      forceIndex = i; // 零长段也可精确呈现
+      vt = seg.offsetStart;
+      render();
+    }
+
+    // 时间轴拖动 / 点击
+    let dragging = false;
+    function seekFromPointer(clientX) {
+      const rect = timelineEl.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      seekVirtual(ratio * CuePlaylist.totalDuration(segments));
+    }
+    timelineEl.addEventListener('mousedown', (e) => { dragging = true; seekFromPointer(e.clientX); });
+    window.addEventListener('mousemove', (e) => { if (dragging) seekFromPointer(e.clientX); });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    playBtn.addEventListener('click', () => setPlaying(!playing));
+    restartBtn.addEventListener('click', () => { setPlaying(false); seekVirtual(0); });
+    document.querySelectorAll('.speed-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        speed = Number(btn.dataset.speed);
+        document.querySelectorAll('.speed-btn').forEach((b) =>
+          b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === speed)));
+      });
+    });
+    window.addEventListener('keydown', (e) => {
+      if (!segments.length || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+      if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+      else if (e.code === 'ArrowLeft') { setPlaying(false); seekVirtual(vt - 1000); }
+      else if (e.code === 'ArrowRight') { setPlaying(false); seekVirtual(vt + 1000); }
+    });
+
+    // ---------------------------------------------------------------------
+    // 初始化：读清单与批注 → 预取各场次数据 → 播放前重定位 → 构建播放器
+    // ---------------------------------------------------------------------
+    async function buildPlayer() {
+      if (!segments.length) {
+        renderOverview(-1);
+        document.getElementById('segmentsCardWrap').style.display = 'none';
+        return;
+      }
+      document.getElementById('segmentsCardWrap').style.display = '';
+      // 渲染所需的各场次 payload（重定位已拉过；此处兜底确保全部就绪）
+      await Promise.all(segments.map((seg) => getPayload(seg.fileId, seg.runId)));
+      vt = 0;
+      forceIndex = null;
+      lastSegIndex = -1;
+      buildTimeline();
+      renderOverview(0);
+      render();
+    }
+
+    async function init() {
+      let doc, all;
+      try {
+        [doc, all] = await Promise.all([CuePlaylist.get(), CueAnnotations.getAll()]);
+      } catch {
+        emptyCard.style.display = '';
+        emptyCard.querySelector('.muted').innerHTML =
+          'IndexedDB 不可用：清单 / 批注无法读取。请通过 localhost 或 HTTPS 访问本页。';
+        return;
+      }
+      playlist = doc;
+      annotations = all;
+      if (!playlist.entries.length) {
+        emptyCard.style.display = '';
+        return;
+      }
+      playerWrap.style.display = '';
+      resolving = runResolve();
+      await resolving;
+    }
+
+    init();
+  })();
+  </script>
+</body>
+</html>

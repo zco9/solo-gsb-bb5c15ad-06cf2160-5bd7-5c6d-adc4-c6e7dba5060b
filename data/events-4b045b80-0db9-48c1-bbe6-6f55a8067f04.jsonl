@@ -1,0 +1,87 @@
+{"ts":"2026-09-19T08:54:35.997Z","event":"position-online","detail":{"position":"灯光"}}
+{"ts":"2026-09-19T08:54:35.999Z","event":"position-online","detail":{"position":"音响"}}
+{"ts":"2026-09-19T08:54:35.999Z","event":"position-online","detail":{"position":"道具"}}
+{"ts":"2026-09-19T08:54:36.199Z","event":"lease-acquired","detail":{"holderId":"test-control-","holderName":"主控","ttlSec":15,"takeover":false,"previousHolder":null}}
+{"ts":"2026-09-19T08:54:36.220Z","event":"session-reset","detail":{"choice":"normal"}}
+{"ts":"2026-09-19T08:54:36.241Z","event":"sequence-set","detail":{"version":1,"count":3,"timeoutSec":3,"cues":[{"seq":1,"text":"灯光渐暗","targets":["灯光"]},{"seq":2,"text":"音乐起，道具就位","targets":["音响","道具"]},{"seq":3,"text":"全场亮灯","targets":["灯光","音响"]}]}}
+{"ts":"2026-09-19T08:54:36.261Z","event":"session-start","detail":{}}
+{"ts":"2026-09-19T08:54:36.261Z","event":"cue-started","detail":{"seq":1,"text":"灯光渐暗","targets":["灯光"],"revision":1,"attemptId":"52573f67-f471-4b26-b2b7-47c5792f8e4b"}}
+{"ts":"2026-09-19T08:54:36.483Z","event":"confirm","detail":{"seq":1,"revision":1,"attemptId":"52573f67-f471-4b26-b2b7-47c5792f8e4b","position":"灯光"}}
+{"ts":"2026-09-19T08:54:36.504Z","event":"confirm-duplicate","detail":{"seq":1,"revision":1,"attemptId":"52573f67-f471-4b26-b2b7-47c5792f8e4b","position":"灯光"}}
+{"ts":"2026-09-19T08:54:36.524Z","event":"cue-completed","detail":{"seq":1,"revision":1,"attemptId":"52573f67-f471-4b26-b2b7-47c5792f8e4b"}}
+{"ts":"2026-09-19T08:54:36.524Z","event":"cue-started","detail":{"seq":2,"text":"音乐起，道具就位","targets":["音响","道具"],"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e"}}
+{"ts":"2026-09-19T08:54:36.544Z","event":"confirm","detail":{"seq":2,"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e","position":"音响"}}
+{"ts":"2026-09-19T08:54:36.765Z","event":"lease-op-denied","detail":{"op":"substitute","clientId":"test-position-灯光","reason":"仅控制端可以执行此操作"}}
+{"ts":"2026-09-19T08:54:37.066Z","event":"position-substituted","detail":{"seq":2,"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e","from":"道具","to":"灯光"}}
+{"ts":"2026-09-19T08:54:37.289Z","event":"position-offline","detail":{"position":"灯光"}}
+{"ts":"2026-09-19T08:54:37.590Z","event":"position-online","detail":{"position":"灯光"}}
+{"ts":"2026-09-19T08:54:39.529Z","event":"cue-timeout","detail":{"seq":2,"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e","missing":["灯光"]}}
+{"ts":"2026-09-19T08:54:39.550Z","event":"confirm-late","detail":{"seq":2,"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e","position":"灯光"}}
+{"ts":"2026-09-19T08:54:39.571Z","event":"cue-completed","detail":{"seq":2,"revision":1,"attemptId":"2f48e282-5ed7-4a17-a7af-dbcc3565362e"}}
+{"ts":"2026-09-19T08:54:39.571Z","event":"cue-started","detail":{"seq":3,"text":"全场亮灯","targets":["灯光","音响"],"revision":1,"attemptId":"0a3f9a80-3a73-4aab-8bba-85d8f2883465"}}
+{"ts":"2026-09-19T08:54:39.591Z","event":"confirm","detail":{"seq":3,"revision":1,"attemptId":"0a3f9a80-3a73-4aab-8bba-85d8f2883465","position":"灯光"}}
+{"ts":"2026-09-19T08:54:39.592Z","event":"confirm","detail":{"seq":3,"revision":1,"attemptId":"0a3f9a80-3a73-4aab-8bba-85d8f2883465","position":"音响"}}
+{"ts":"2026-09-19T08:54:39.612Z","event":"cue-completed","detail":{"seq":3,"revision":1,"attemptId":"0a3f9a80-3a73-4aab-8bba-85d8f2883465"}}
+{"ts":"2026-09-19T08:54:39.612Z","event":"sequence-finished","detail":{}}
+{"ts":"2026-09-19T08:54:39.632Z","event":"session-reset","detail":{"choice":"normal"}}
+{"ts":"2026-09-19T08:54:39.653Z","event":"sequence-set","detail":{"version":2,"count":2,"timeoutSec":3,"cues":[{"seq":1,"text":"第一版口令","targets":["灯光","音响"]},{"seq":2,"text":"下一条","targets":["道具"]}]}}
+{"ts":"2026-09-19T08:54:39.673Z","event":"session-start","detail":{}}
+{"ts":"2026-09-19T08:54:39.673Z","event":"cue-started","detail":{"seq":1,"text":"第一版口令","targets":["灯光","音响"],"revision":1,"attemptId":"7fadc326-b049-4396-b167-d709fdbfb787"}}
+{"ts":"2026-09-19T08:54:39.693Z","event":"lease-op-denied","detail":{"op":"recall","clientId":"test-position-灯光","reason":"仅控制端可以执行此操作"}}
+{"ts":"2026-09-19T08:54:39.994Z","event":"confirm","detail":{"seq":1,"revision":1,"attemptId":"7fadc326-b049-4396-b167-d709fdbfb787","position":"灯光"}}
+{"ts":"2026-09-19T08:54:40.115Z","event":"cue-recalled","detail":{"seq":1,"oldRevision":1,"newRevision":2,"oldAttemptId":"7fadc326-b049-4396-b167-d709fdbfb787","reason":"口令措辞有误","newText":"第二版口令（修正）"}}
+{"ts":"2026-09-19T08:54:40.115Z","event":"cue-resent","detail":{"seq":1,"text":"第二版口令（修正）","reason":"口令措辞有误","revision":2,"attemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9"}}
+{"ts":"2026-09-19T08:54:40.136Z","event":"stale-confirm-ignored","detail":{"seq":1,"position":"灯光","sentAttemptId":"7fadc326-b049-4396-b167-d709fdbfb787","currentAttemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9","currentRevision":2}}
+{"ts":"2026-09-19T08:54:40.437Z","event":"stale-confirm-ignored","detail":{"seq":1,"position":"灯光","sentAttemptId":null,"currentAttemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9","currentRevision":2}}
+{"ts":"2026-09-19T08:54:42.673Z","event":"stale-timeout-ignored","detail":{"seq":1,"staleRevision":1,"staleAttemptId":"7fadc326-b049-4396-b167-d709fdbfb787","currentAttemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9"}}
+{"ts":"2026-09-19T08:54:42.697Z","event":"position-online","detail":{"position":"音响"}}
+{"ts":"2026-09-19T08:54:42.717Z","event":"cue-recalled","detail":{"seq":1,"oldRevision":2,"newRevision":3,"oldAttemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9","reason":"再次更正目标动作","newText":"第三版口令"}}
+{"ts":"2026-09-19T08:54:42.717Z","event":"cue-resent","detail":{"seq":1,"text":"第三版口令","reason":"再次更正目标动作","revision":3,"attemptId":"81ce449b-36df-45f8-8181-eb987a8fe440"}}
+{"ts":"2026-09-19T08:54:42.738Z","event":"confirm","detail":{"seq":1,"revision":3,"attemptId":"81ce449b-36df-45f8-8181-eb987a8fe440","position":"灯光"}}
+{"ts":"2026-09-19T08:54:42.738Z","event":"confirm","detail":{"seq":1,"revision":3,"attemptId":"81ce449b-36df-45f8-8181-eb987a8fe440","position":"音响"}}
+{"ts":"2026-09-19T08:54:43.058Z","event":"cue-completed","detail":{"seq":1,"revision":3,"attemptId":"81ce449b-36df-45f8-8181-eb987a8fe440"}}
+{"ts":"2026-09-19T08:54:43.059Z","event":"cue-started","detail":{"seq":2,"text":"下一条","targets":["道具"],"revision":1,"attemptId":"1a22abd4-271b-4a09-9234-5e1a79e6be14"}}
+{"ts":"2026-09-19T08:54:43.079Z","event":"confirm","detail":{"seq":2,"revision":1,"attemptId":"1a22abd4-271b-4a09-9234-5e1a79e6be14","position":"道具"}}
+{"ts":"2026-09-19T08:54:43.101Z","event":"cue-completed","detail":{"seq":2,"revision":1,"attemptId":"1a22abd4-271b-4a09-9234-5e1a79e6be14"}}
+{"ts":"2026-09-19T08:54:43.101Z","event":"sequence-finished","detail":{}}
+{"ts":"2026-09-19T08:54:43.115Z","event":"stale-timeout-ignored","detail":{"seq":1,"staleRevision":2,"staleAttemptId":"df1aea60-2d3c-4a72-bece-a48a4c30d9a9","currentAttemptId":null}}
+{"ts":"2026-09-19T08:54:43.322Z","event":"session-reset","detail":{"choice":"normal"}}
+{"ts":"2026-09-19T08:54:43.342Z","event":"sequence-set","detail":{"version":3,"count":1,"timeoutSec":3,"cues":[{"seq":1,"text":"暂停测试口令","targets":["灯光","音响"]}]}}
+{"ts":"2026-09-19T08:54:43.362Z","event":"session-start","detail":{}}
+{"ts":"2026-09-19T08:54:43.362Z","event":"cue-started","detail":{"seq":1,"text":"暂停测试口令","targets":["灯光","音响"],"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae"}}
+{"ts":"2026-09-19T08:54:43.383Z","event":"lease-op-denied","detail":{"op":"pause","clientId":"test-position-灯光","reason":"仅控制端可以执行此操作"}}
+{"ts":"2026-09-19T08:54:43.684Z","event":"cue-paused","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","operator":"test-control-","reason":"设备调试","remainingSec":3}}
+{"ts":"2026-09-19T08:54:43.705Z","event":"paused-confirm-rejected","detail":{"seq":1,"position":"灯光","attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae"}}
+{"ts":"2026-09-19T08:54:47.510Z","event":"position-online","detail":{"position":"道具"}}
+{"ts":"2026-09-19T08:54:47.531Z","event":"cue-resumed","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","operator":"test-control-","remainingSec":3}}
+{"ts":"2026-09-19T08:54:47.552Z","event":"confirm","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","position":"灯光"}}
+{"ts":"2026-09-19T08:54:47.572Z","event":"cue-paused","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","operator":"test-control-","reason":"二次暂停","remainingSec":3}}
+{"ts":"2026-09-19T08:54:48.793Z","event":"cue-resumed","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","operator":"test-control-","remainingSec":3}}
+{"ts":"2026-09-19T08:54:51.430Z","event":"cue-timeout","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","missing":["音响"]}}
+{"ts":"2026-09-19T08:54:51.435Z","event":"cue-paused","detail":{"seq":1,"revision":1,"attemptId":"eb129035-367d-4ff3-902d-3b89c86dd9ae","operator":"test-control-","reason":"超时后暂停","remainingSec":0}}
+{"ts":"2026-09-19T08:54:51.455Z","event":"session-reset","detail":{"choice":"normal"}}
+{"ts":"2026-09-19T08:54:51.681Z","event":"lease-op-denied","detail":{"op":"start","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.682Z","event":"lease-op-denied","detail":{"op":"advance","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.683Z","event":"lease-op-denied","detail":{"op":"reset","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.684Z","event":"lease-op-denied","detail":{"op":"substitute","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.685Z","event":"lease-op-denied","detail":{"op":"recall","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.686Z","event":"lease-op-denied","detail":{"op":"pause","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:51.686Z","event":"lease-op-denied","detail":{"op":"resume","clientId":"test-control-b","reason":"指挥权租约由「主控」持有（剩余约 14 秒），您无权操作；待其释放或过期后可接管"}}
+{"ts":"2026-09-19T08:54:54.583Z","event":"lease-acquire-denied","detail":{"requester":"test-control-b","holderId":"test-control-","holderName":"主控","remainingSec":15}}
+{"ts":"2026-09-19T08:54:54.884Z","event":"lease-released","detail":{"holderId":"test-control-","holderName":"主控","reason":"voluntary"}}
+{"ts":"2026-09-19T08:54:54.904Z","event":"lease-op-denied","detail":{"op":"start","clientId":"test-control-b","reason":"当前无人持有指挥权租约，请先在控制端申请指挥权"}}
+{"ts":"2026-09-19T08:54:55.105Z","event":"lease-acquired","detail":{"holderId":"test-control-b","holderName":"B","ttlSec":15,"takeover":false,"previousHolder":null}}
+{"ts":"2026-09-19T08:54:55.106Z","event":"lease-acquire-denied","detail":{"requester":"test-control-c","holderId":"test-control-b","holderName":"B","remainingSec":15}}
+{"ts":"2026-09-19T08:54:55.506Z","event":"stale-lease-heartbeat-ignored","detail":{"clientId":"test-control-","reason":"token-mismatch"}}
+{"ts":"2026-09-19T08:55:11.063Z","event":"lease-expired","detail":{"holderId":"test-control-b","holderName":"B"}}
+{"ts":"2026-09-19T08:55:11.079Z","event":"lease-acquired","detail":{"holderId":"test-control-","holderName":"主控","ttlSec":15,"takeover":false,"previousHolder":null}}
+{"ts":"2026-09-19T08:55:11.099Z","event":"stale-lease-heartbeat-ignored","detail":{"clientId":"test-control-","reason":"token-mismatch"}}
+{"ts":"2026-09-19T08:55:11.399Z","event":"session-start","detail":{}}
+{"ts":"2026-09-19T08:55:11.399Z","event":"cue-started","detail":{"seq":1,"text":"暂停测试口令","targets":["灯光","音响"],"revision":1,"attemptId":"22d1fb7d-ab09-4810-b740-ceb0863077a0"}}
+{"ts":"2026-09-19T08:55:11.421Z","event":"session-reset","detail":{"choice":"normal"}}
+{"ts":"2026-09-19T08:55:11.442Z","event":"lease-released","detail":{"holderId":"test-control-","holderName":"主控","reason":"disconnect"}}
+{"ts":"2026-09-19T08:55:11.468Z","event":"position-offline","detail":{"position":"灯光"}}
+{"ts":"2026-09-19T08:55:11.468Z","event":"position-offline","detail":{"position":"音响"}}
+{"ts":"2026-09-19T08:55:11.469Z","event":"position-offline","detail":{"position":"道具"}}
+{"ts":"2026-09-19T08:55:11.469Z","event":"position-offline","detail":{"position":"音响"}}
+{"ts":"2026-09-19T08:55:11.469Z","event":"position-offline","detail":{"position":"道具"}}

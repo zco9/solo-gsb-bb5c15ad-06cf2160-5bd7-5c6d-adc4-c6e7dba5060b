@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>场次对比 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🔀 场次对比（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="latency.html">确认延迟诊断</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main class="compare-main">
+    <!-- 场次选择 -->
+    <section class="card">
+      <h2>选择两个已结束场次</h2>
+      <div class="muted" style="margin-bottom:12px">
+        对比为纯只读操作：直接读取 <code>data</code> 目录事件日志生成对照表，不连接 WebSocket、不写入任何日志或演出状态。
+      </div>
+      <div id="sessLoading" class="muted">正在读取已结束场次列表…</div>
+      <div class="compare-pickers">
+        <div>
+          <label class="compare-label" for="leftSelect">左场 A（作为基准 / 删除项参照）</label>
+          <select id="leftSelect" disabled></select>
+          <a id="leftReplayLink" class="compare-open-replay" href="#" target="_blank" rel="noopener" style="display:none">↗ 在复盘中打开左场</a>
+        </div>
+        <div>
+          <label class="compare-label" for="rightSelect">右场 B（作为对照 / 新增项参照）</label>
+          <select id="rightSelect" disabled></select>
+          <a id="rightReplayLink" class="compare-open-replay" href="#" target="_blank" rel="noopener" style="display:none">↗ 在复盘中打开右场</a>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button id="compareBtn" class="narrow" disabled>生成逐口令对照表</button>
+        <span id="pickerHint" class="muted narrow"></span>
+      </div>
+    </section>
+
+    <!-- 对比结果 -->
+    <section id="resultCard" class="card" style="display:none">
+      <h2>逐口令对照表</h2>
+      <div class="compare-session-meta" id="sessionMeta"></div>
+      <div class="compare-legend">
+        <span><i class="lg lg-match"></i> 匹配（两场共有）</span>
+        <span><i class="lg lg-added"></i> 新增（仅右场 B）</span>
+        <span><i class="lg lg-deleted"></i> 删除（仅左场 A）</span>
+        <span class="muted">匹配键 = 规范化口令文本 + 排序后的目标岗位；点击任一侧口令可跳转到对应复盘时刻。</span>
+      </div>
+      <div id="summaryChips" style="margin:10px 0"></div>
+      <div class="compare-table-wrap">
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th class="cmp-cue-col">左场 A 口令</th>
+              <th class="cmp-metric-col">A 指标</th>
+              <th class="cmp-diff-col">差值（B − A）</th>
+              <th class="cmp-metric-col">B 指标</th>
+              <th class="cmp-cue-col">右场 B 口令</th>
+            </tr>
+          </thead>
+          <tbody id="compareTbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：本脚本只发起 GET 请求，不创建 WebSocket，也没有任何写接口调用。
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+    // 指标值展示：耗时保留 1 位小数（秒）
+    function fmtMetric(key, v) {
+      if (key === 'durationMs') {
+        if (v == null) return '—';
+        return `${(Math.round(v / 100) / 10).toFixed(1)} 秒`;
+      }
+      return String(v);
+    }
+    // 差值展示：耗时差带符号秒；计数差带正负号
+    function fmtDelta(key, d) {
+      if (key === 'durationMs') {
+        if (d == null) return '—';
+        const v = Math.round(d / 100) / 10;
+        return `${v > 0 ? '+' : ''}${v.toFixed(1)} 秒`;
+      }
+      if (d === 0) return '0';
+      return `${d > 0 ? '+' : ''}${d}`;
+    }
+
+    const METRICS = [
+      { key: 'durationMs', label: '耗时' },
+      { key: 'timeouts', label: '超时' },
+      { key: 'lateConfirms', label: '迟到确认' },
+      { key: 'revisions', label: '修订' },
+      { key: 'pauses', label: '暂停' },
+    ];
+
+    const leftSelect = document.getElementById('leftSelect');
+    const rightSelect = document.getElementById('rightSelect');
+    const leftReplayLink = document.getElementById('leftReplayLink');
+    const rightReplayLink = document.getElementById('rightReplayLink');
+    const compareBtn = document.getElementById('compareBtn');
+    const pickerHint = document.getElementById('pickerHint');
+    const sessLoading = document.getElementById('sessLoading');
+    const resultCard = document.getElementById('resultCard');
+    const sessionMeta = document.getElementById('sessionMeta');
+    const summaryChips = document.getElementById('summaryChips');
+    const compareTbody = document.getElementById('compareTbody');
+
+    let sessions = [];
+
+    function refValue(s) { return `${s.fileId}/${s.runId}`; }
+    function parseRef(v) {
+      const idx = String(v || '').indexOf('/');
+      if (idx < 0) return null;
+      return { fileId: v.slice(0, idx), runId: v.slice(idx + 1) };
+    }
+    function optionLabel(s) {
+      return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 条口令 ｜ ${fmtDuration(s.durationMs)} ｜ ${s.fileId.slice(0, 8)}… #${s.runId + 1}`;
+    }
+
+    function replayHref(ref, t) {
+      const q = new URLSearchParams({ file: ref.fileId, run: ref.runId });
+      if (Number.isFinite(t) && t > 0) q.set('t', Math.round(t));
+      return `replay.html?${q.toString()}`;
+    }
+
+    function refreshPickerState() {
+      const same = leftSelect.value && leftSelect.value === rightSelect.value;
+      compareBtn.disabled = !leftSelect.value || !rightSelect.value || same;
+      pickerHint.textContent = same ? '请选择两个不同的场次' : '';
+      [leftSelect, rightSelect].forEach((sel) => {
+        const link = sel === leftSelect ? leftReplayLink : rightReplayLink;
+        if (sel.value) {
+          const ref = parseRef(sel.value);
+          link.href = replayHref(ref, null);
+          link.style.display = '';
+        } else {
+          link.style.display = 'none';
+        }
+      });
+    }
+
+    function metricsBlock(cue) {
+      if (!cue) {
+        return `<div class="cmp-metrics cmp-empty">${METRICS.map(() =>
+          '<div class="mline"><span class="mlabel"></span><span class="mval">—</span></div>').join('')}</div>`;
+      }
+      return `<div class="cmp-metrics">${METRICS.map((m) => {
+        const warn = (m.key === 'timeouts' && cue.timeouts > 0) ||
+          (m.key === 'lateConfirms' && cue.lateConfirms > 0) ||
+          (m.key === 'revisions' && cue.revisions > 0) ||
+          (m.key === 'pauses' && cue.pauses > 0);
+        return `<div class="mline"><span class="mlabel">${m.label}</span>` +
+          `<span class="mval${warn ? ' warn' : ''}">${esc(fmtMetric(m.key, cue[m.key]))}</span></div>`;
+      }).join('')}</div>`;
+    }
+
+    function deltaBlock(left, right) {
+      return `<div class="cmp-deltas">${METRICS.map((m) => {
+        const lv = left[m.key];
+        const rv = right[m.key];
+        if (lv == null || rv == null) {
+          return '<div class="mline"><span class="mdiff empty">—</span></div>';
+        }
+        const d = rv - lv;
+        let cls = 'zero';
+        if (d !== 0) {
+          // 异常类计数（超时/迟到/修订/暂停）：增加偏红、减少偏绿；耗时变化用中性暖色
+          cls = m.key === 'durationMs' ? 'neutral' : (d > 0 ? 'bad' : 'good');
+        }
+        return `<div class="mline"><span class="mdiff ${cls}">${esc(fmtDelta(m.key, d))}</span></div>`;
+      }).join('')}</div>`;
+    }
+
+    function cueCell(side, cue, session) {
+      if (!cue) return '<td class="cmp-cue cmp-none"><span class="muted">—</span></td>';
+      const ref = { fileId: session.session.fileId, runId: session.session.runId };
+      const revised = cue.revisions > 0;
+      return `<td class="cmp-cue cmp-${side}">
+        <a class="cmp-cue-link" href="${esc(replayHref(ref, cue.startT))}" title="点击跳转到该口令在复盘页的发出时刻">
+          <span class="chip ${revised ? 'late' : ''}">#${cue.seq}${revised ? ` · v${cue.revisions + 1}` : ''}</span>
+          <span class="cmp-cue-text">${esc(cue.text)}</span>
+          ${revised && cue.finalText && cue.finalText !== cue.text
+            ? `<span class="cmp-cue-final" title="最终修订版文本">最终：${esc(cue.finalText)}</span>` : ''}
+          <span class="cmp-cue-targets">→ ${cue.targets.map((t) => esc(t)).join('、')}</span>
+        </a>
+      </td>`;
+    }
+
+    function renderResult(payload) {
+      resultCard.style.display = '';
+      const l = payload.left;
+      const r = payload.right;
+      sessionMeta.innerHTML = `
+        <div class="cmp-side-meta">
+          <b>左场 A</b>：${esc(fmtClock(l.session.startedAt))} → ${esc(fmtClock(l.session.finishedAt))}
+          ｜ ${l.session.cueCount} 条 ｜ 时长 ${esc(fmtDuration(l.session.durationMs))} ｜ 时限 ${l.timeoutSec}s
+        </div>
+        <div class="cmp-side-meta">
+          <b>右场 B</b>：${esc(fmtClock(r.session.startedAt))} → ${esc(fmtClock(r.session.finishedAt))}
+          ｜ ${r.session.cueCount} 条 ｜ 时长 ${esc(fmtDuration(r.session.durationMs))} ｜ 时限 ${r.timeoutSec}s
+        </div>`;
+      const s = payload.summary;
+      summaryChips.innerHTML = `
+        <span class="chip ok">匹配 ${s.matched}</span>
+        <span class="chip" style="background:#1e3a2a;color:#8fe3a5">新增 ${s.added}</span>
+        <span class="chip" style="background:#4a2b2b;color:#ff9c9c">删除 ${s.deleted}</span>
+        <span class="muted">对齐序列共 ${payload.rows.length} 行（动态规划保持两场原顺序）</span>`;
+
+      compareTbody.innerHTML = payload.rows.map((row) => {
+        if (row.type === 'match') {
+          return `<tr class="cmp-row match">
+            ${cueCell('left', row.left, l)}
+            <td>${metricsBlock(row.left)}</td>
+            <td>${deltaBlock(row.left, row.right)}</td>
+            <td>${metricsBlock(row.right)}</td>
+            ${cueCell('right', row.right, r)}
+          </tr>`;
+        }
+        if (row.type === 'added') {
+          return `<tr class="cmp-row added">
+            <td class="cmp-cue cmp-none"><span class="muted">—</span></td>
+            <td>${metricsBlock(null)}</td>
+            <td><div class="cmp-deltas"><div class="mline"><span class="cmp-tag tag-added">新增</span></div></div></td>
+            <td>${metricsBlock(row.right)}</td>
+            ${cueCell('right', row.right, r)}
+          </tr>`;
+        }
+        return `<tr class="cmp-row deleted">
+          ${cueCell('left', row.left, l)}
+          <td>${metricsBlock(row.left)}</td>
+          <td><div class="cmp-deltas"><div class="mline"><span class="cmp-tag tag-deleted">删除</span></div></div></td>
+          <td>${metricsBlock(null)}</td>
+          <td class="cmp-cue cmp-none"><span class="muted">—</span></td>
+        </tr>`;
+      }).join('');
+
+      resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function runCompare(aRef, bRef) {
+      compareBtn.disabled = true;
+      compareBtn.textContent = '正在生成对照表…';
+      try {
+        const url = `/api/compare/sessions?a=${encodeURIComponent(aRef)}&b=${encodeURIComponent(bRef)}`;
+        const resp = await fetch(url);
+        const payload = await resp.json();
+        if (!resp.ok || payload.error) {
+          alert(`生成对照表失败：${payload.error || resp.status}`);
+          return;
+        }
+        renderResult(payload);
+      } catch {
+        alert('对照表加载失败，请确认服务已启动');
+      } finally {
+        compareBtn.textContent = '生成逐口令对照表';
+        refreshPickerState();
+      }
+    }
+
+    async function init() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessions = payload.sessions || [];
+      if (sessions.length < 2) {
+        sessLoading.innerHTML = '<span style="color:#f0c169">已结束场次不足两场，暂时无法对比（需要两个 session-start → sequence-finished 完整闭合的场次）。</span>';
+        return;
+      }
+      sessLoading.style.display = 'none';
+      const options = sessions.map((s) =>
+        `<option value="${esc(refValue(s))}">${esc(optionLabel(s))}</option>`).join('');
+      leftSelect.innerHTML = '<option value="">请选择左场 A…</option>' + options;
+      rightSelect.innerHTML = '<option value="">请选择右场 B…</option>' + options;
+      leftSelect.disabled = false;
+      rightSelect.disabled = false;
+
+      // 支持 URL 预选（a/b 均为 fileId/runId），便于从其他页面直达对比
+      const params = new URLSearchParams(location.search);
+      const presetA = params.get('a');
+      const presetB = params.get('b');
+      const valid = (v) => sessions.some((s) => refValue(s) === v);
+      if (presetA && valid(presetA)) leftSelect.value = presetA;
+      if (presetB && valid(presetB)) rightSelect.value = presetB;
+      if (!rightSelect.value && leftSelect.value) {
+        // 默认预选：左场取最新场次时，右场顺延一场，避免误选同场
+        const idx = sessions.findIndex((s) => refValue(s) === leftSelect.value);
+        if (idx >= 0 && idx + 1 < sessions.length) rightSelect.value = refValue(sessions[idx + 1]);
+      }
+      refreshPickerState();
+      if (presetA && presetB && valid(presetA) && valid(presetB) && presetA !== presetB) {
+        runCompare(presetA, presetB);
+      }
+    }
+
+    [leftSelect, rightSelect].forEach((sel) => sel.addEventListener('change', refreshPickerState));
+    compareBtn.addEventListener('click', () => runCompare(leftSelect.value, rightSelect.value));
+
+    init();
+  })();
+  </script>
+</body>
+</html>
