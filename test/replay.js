@@ -19,13 +19,22 @@ function check(name, cond) {
   else { failed++; console.log(`  ✘ ${name}`); }
 }
 
-// 浏览器版 public/replay.js 的纯函数确定性重放器，在 Node 中加载以复用同一份实现
+// 浏览器版 public/core.js（共享纯函数内核）+ public/replay.js（展示层适配），
+// 在 Node 中按页面相同顺序拼接装载以复用同一份实现
+function loadBrowserFactory(file, factoryName) {
+  let src = fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8');
+  src = src.replace(/^'use strict';\s*/, '').replace(/\nif \(typeof module[\s\S]*$/, '');
+  const head = `const ${factoryName} = (() => {`;
+  const start = src.indexOf(head);
+  const end = src.lastIndexOf('})();');
+  return src.slice(start + head.length, end);
+}
+
 function loadBrowserReplay() {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'replay.js'), 'utf8');
-  const sandbox = { structuredClone: (o) => JSON.parse(JSON.stringify(o)) };
-  const fn = new Function('structuredClone',
-    src.replace('const Replay = (() => {', 'return (() => {'));
-  return fn(sandbox.structuredClone);
+  const coreBody = loadBrowserFactory('core.js', 'CueCore');
+  const replayBody = loadBrowserFactory('replay.js', 'Replay');
+  const CueCore = new Function(`return (() => {${coreBody}})();`)();
+  return new Function('CueCore', `return (() => {${replayBody}})();`)(CueCore);
 }
 
 const SESSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';

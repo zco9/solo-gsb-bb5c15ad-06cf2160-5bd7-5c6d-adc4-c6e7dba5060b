@@ -21,12 +21,22 @@ function check(name, cond) {
   else { failed++; console.log(`  ✘ ${name}`); }
 }
 
-// 与 test/playlist.js 同一方式把浏览器脚本装入 Node
+// 与 test/playlist.js 同一方式把浏览器脚本装入 Node；latency.js 依赖共享内核
+// core.js，按页面加载顺序先装内核再装诊断模块
+function loadBrowserFactory(file, factoryName) {
+  let src = fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8');
+  src = src.replace(/^'use strict';\s*/, '').replace(/\nif \(typeof module[\s\S]*$/, '');
+  const head = `const ${factoryName} = (() => {`;
+  const start = src.indexOf(head);
+  const end = src.lastIndexOf('})();');
+  return src.slice(start + head.length, end);
+}
+
 function loadBrowserModule(file, factoryName) {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8');
-  const withoutExport = src.replace(/\nif \(typeof module[\s\S]*$/, '');
-  const fn = new Function(withoutExport.replace(`const ${factoryName} = (() => {`, 'return (() => {'));
-  return fn();
+  const coreBody = loadBrowserFactory('core.js', 'CueCore');
+  const body = loadBrowserFactory(file, factoryName);
+  const CueCore = new Function(`return (() => {${coreBody}})();`)();
+  return new Function('CueCore', `return (() => {${body}})();`)(CueCore);
 }
 
 const L = loadBrowserModule('latency.js', 'CueLatency');

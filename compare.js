@@ -4,9 +4,11 @@
 // 场次对比（只读）模块
 //
 // 在「演出复盘」已切分好的已结束场次（session-start → sequence-finished）
-// 之上，提取每条口令的执行指标，并按「规范化口令文本 + 排序后的目标岗位」
-// 构造匹配键，用动态规划在保持两场原有序列顺序的前提下完成序列对齐
-// （类 Needleman–Wunsch / LCS），输出逐口令对照表：
+// 之上，用与浏览器共用的纯函数内核 public/core.js 把单场事件折叠为统一的
+// 「场次 / 口令 / 轮次」模型，再从模型中提取每条口令的执行指标，按
+// 「规范化口令文本 + 排序后的目标岗位」构造匹配键，用动态规划在保持两场
+// 原有序列顺序的前提下完成序列对齐（类 Needleman–Wunsch / LCS），输出
+// 逐口令对照表：
 //   - match（匹配，两场共有）| added（仅右场，新增）| deleted（仅左场，删除）
 //
 // 同一批重复键可能对应多种最优对齐，按以下全序裁决唯一结果：
@@ -20,6 +22,7 @@
 // ---------------------------------------------------------------------------
 
 const replay = require('./replay');
+const { CueCore } = require('./public/core');
 
 // 口令文本规范化：NFKC 全角/半角统一（全角空格 U+3000 等在这一步归一为 ASCII 空白）→
 // 删除汉字之间 / 汉字两侧的排版空白（中文口令中的空格通常只是排版）→
@@ -50,94 +53,55 @@ function cueKey(cue) {
 }
 
 // ---------------------------------------------------------------------------
-// 单场口令指标提取：完全基于 replay 单场接口返回的事件流（保持日志行序）
+// 单场口令指标提取：把单场事件流交给共享内核折叠（与复盘 / 延迟诊断同一份
+// 状态机），再从轮次模型派生对比指标。修订、暂停恢复、替岗、超时、迟到确认
+// 与旧 attemptId 的归属规则全部在内核中统一处理，本函数只做投影与汇总。
 //
 // 每条口令统计：
 //   durationMs  从口令开始（首次 cue-started；修订重发不重置，即「从口令开始到完成」）
-//               到 cue-completed 的墙钟耗时；未闭合口令为 null
-//   timeouts    确认超时次数（cue-timeout 事件数；修订后再次超时累计）
-//   lateConfirms 迟到确认次数（confirm-late 事件数）
-//   revisions   修订次数（修订号 - 1，即 cue-resent / cue-recalled 次数）
-//   pauses      暂停次数（cue-paused 事件数）
+//               到首个 completed 轮收口的墙钟耗时；未闭合口令为 null
+//   timeouts    确认超时次数（各轮首次 cue-timeout 计入；修订后再次超时累计）
+//   lateConfirms 迟到确认岗位次数（各轮 confirm-late 去重岗位后累计）
+//   revisions   修订次数（修订轮数 - 1，即 cue-resent 次数）
+//   pauses      暂停次数（各轮 cue-paused 次数）
 //   finalText   最终修订版文本（未修订时等于原文本）
 // 同时返回每条口令开始事件的相对偏移 startT，供前端跳转复盘时刻。
 // ---------------------------------------------------------------------------
 function extractCues(sessionData) {
   const events = Array.isArray(sessionData.events) ? sessionData.events : [];
-  const bySeq = new Map();
+  const timeoutSec = Number(sessionData && sessionData.timeoutSec) > 0
+    ? Number(sessionData.timeoutSec) : CueCore.DEFAULT_TIMEOUT_SEC;
+  const model = CueCore.foldEvents(events, { timeoutSec });
 
-  const ensure = (seq) => {
-    let c = bySeq.get(seq);
-    if (!c) {
-      c = {
-        seq,
-        text: '',
-        targets: [],
-        key: null,
-        startT: null,
-        completeT: null,
-        durationMs: null,
-        timeouts: 0,
-        lateConfirms: 0,
-        revisions: 0,
-        pauses: 0,
-        finalText: '',
-      };
-      bySeq.set(seq, c);
-    }
-    return c;
+  const metricsOf = (cue) => {
+    const rounds = cue.rounds;
+    const first = rounds[0];
+    const completed = rounds.filter((r) => r.endState === 'completed');
+    const closing = completed.length ? completed[0] : null;
+
+    const startT = first ? first.startT : null;
+    const completeT = closing ? closing.endT : null;
+    const lastRound = rounds[rounds.length - 1];
+
+    return {
+      seq: cue.seq,
+      // 冻结快照：匹配键始终基于首次 cue-started 的原始文本与原始目标，
+      // 修订后的文本只反映在 finalText
+      text: cue.text,
+      targets: [...cue.targets],
+      key: cueKey({ text: cue.text, targets: cue.targets }),
+      startT,
+      completeT,
+      durationMs: completeT != null && startT != null ? completeT - startT : null,
+      timeouts: rounds.reduce((n, r) => n + (r.timeoutEvent ? 1 : 0), 0),
+      lateConfirms: rounds.reduce((n, r) => n + r.confirms.filter((c) => c.late).length, 0),
+      revisions: rounds.length - 1, // 第 1 轮之外的轮次均由 cue-resent 开启
+      pauses: rounds.reduce((n, r) => n + r.pauses.filter((p) => !p.synthetic).length, 0),
+      finalText: lastRound ? lastRound.text : cue.text,
+    };
   };
 
-  for (const ev of events) {
-    const d = (ev && ev.detail) || {};
-    const seq = Number(d.seq);
-    if (!Number.isInteger(seq) || seq <= 0) continue;
-
-    switch (ev.event) {
-      case 'cue-started': {
-        // 同 seq 的修订重发不再产生 cue-started（重发事件为 cue-resent），
-        // 此处登记的即该口令的冻结快照与开始时刻
-        const c = ensure(seq);
-        if (!c.text) {
-          c.text = String(d.text || '');
-          c.targets = Array.isArray(d.targets)
-            ? [...new Set(d.targets.map((t) => String(t).trim()).filter(Boolean))]
-            : [];
-          c.key = cueKey({ text: c.text, targets: c.targets });
-          c.finalText = c.text;
-        }
-        if (c.startT == null) c.startT = ev.t;
-        break;
-      }
-      case 'cue-resent': {
-        const c = ensure(seq);
-        c.revisions += 1;
-        if (d.text) c.finalText = String(d.text);
-        break;
-      }
-      case 'cue-completed': {
-        const c = ensure(seq);
-        if (c.completeT == null) {
-          c.completeT = ev.t;
-          if (c.startT != null) c.durationMs = ev.t - c.startT;
-        }
-        break;
-      }
-      case 'cue-timeout':
-        ensure(seq).timeouts += 1;
-        break;
-      case 'confirm-late':
-        ensure(seq).lateConfirms += 1;
-        break;
-      case 'cue-paused':
-        ensure(seq).pauses += 1;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  return model.cues.map(metricsOf).sort((a, b) => a.seq - b.seq);
 }
 
 // ---------------------------------------------------------------------------

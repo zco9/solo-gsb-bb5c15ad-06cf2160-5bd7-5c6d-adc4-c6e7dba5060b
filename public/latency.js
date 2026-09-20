@@ -1,6 +1,7 @@
 /* 确认延迟诊断前端（只读）：基于复盘 GET 接口返回的单场事件流，
- * 按 attemptId 重建每个口令的每一次确认轮次（含撤回修订轮次），
- * 并从等待时长中扣除暂停区间，生成各目标岗位的确认瀑布数据。
+ * 用与复盘 / 场次对比共用的纯函数内核（public/core.js 的 CueCore）折叠出
+ * 每个口令的每一次确认轮次（含撤回修订轮次），再从轮次模型生成各目标岗位
+ * 的确认瀑布数据——从等待时长中扣除暂停区间。
  *
  * 只读保证（与复盘 / 对比 / 归档一致）：
  *   - 本文件是纯函数分析器，不创建 WebSocket、不调用任何写接口；
@@ -8,7 +9,7 @@
  *     两个既有只读 GET 接口拉取（复用演出复盘接口，不新增服务端接口）；
  *   - 所有结论只由日志行序上的事件重建，绝不引用当前演出状态。
  *
- * 重建口径（与 server.js 实时状态机、public/replay.js 的 foldUntil 完全一致）：
+ * 重建口径（内核统一实现，与 server.js 实时状态机、复盘 foldUntil 完全一致）：
  *   - cue-started 开启第 1 轮（attemptId 取事件详情中的值）；cue-resent 开启
  *     修订轮次（同 seq、revision 递增、新 attemptId）；cue-recalled 封存上一轮为
  *     recalled，cue-completed 封存为 completed；
@@ -16,19 +17,25 @@
  *   - confirm-late 同时保留「超时」与「迟到」两个标记；
  *   - cue-paused/cue-resumed 为闭合暂停区间（同一 attemptId），计算等待时长时
  *     按与 [轮次开始, 观察时刻] 的交集整体扣除，重复暂停 / 恢复不累计误差。
+ *
+ * 本文件只保留「轮次模型 → 瀑布行 / 汇总 / 筛选」的投影逻辑，
+ * 不再自行实现任何状态转移。
  */
 'use strict';
 
+// Node（require）环境下共享内核经 module 装配；浏览器中由 <script src="core.js">
+// 提供同名全局。两种环境共用同一份文件，无任何环境相关分支逻辑。
+const CueCore = typeof globalThis !== 'undefined' && globalThis.CueCore
+  ? globalThis.CueCore
+  : require('./core').CueCore;
+
 const CueLatency = (() => {
+  const C = CueCore; // 复盘 / 对比 / 延迟诊断共用的折叠内核
+
   const STATUS_CONFIRMED = 'confirmed';
   const STATUS_LATE = 'late';
   const STATUS_TIMEOUT = 'timeout'; // 轮次结束时仍超时未确认
   const STATUS_PENDING = 'pending'; // 撤回时未确认（轮次尚未走到超时）
-
-  function num(v, fallback = 0) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  }
 
   // 两个闭区间的重叠时长（输入均为毫秒偏移）；无重叠返回 0
   function overlapMs(aStart, aEnd, bStart, bEnd) {
@@ -75,13 +82,14 @@ const CueLatency = (() => {
   //
   // 输入 sessionData：GET /api/replay/sessions/:fileId/:runId 的返回
   //   { session, timeoutSec, sequence, events: [{line,ts,t,event,detail}], ... }
-  // 输出：
+  // 状态折叠与收口（轮次开合、修订、暂停闭合、旧 attemptId 归属、损坏兜底）
+  // 全部由共享内核完成；输出结构保持页面既有契约：
   //   { session, timeoutSec, positions, summary, cues: [
   //       { seq, text, targets, revisions, recallReasons,
   //         rounds: [Round], totals: {...Cue 级汇总} } ],
   //     orphanStale: [...] } 不属于任何可识别轮次的旧轮次拒绝事件
   //
-  // Round：
+  // Round（内核模型字段 + 本模块投影出的 rows/axisMax/stats）：
   //   { attemptId, revision, seq, text, reason, startEvent, startT,
   //     endState, endEvent, endT, budgetMs, deadlineT,
   //     pauses: [{startT,endT,reason,startEvent,resumeEvent,startIso}],
@@ -95,262 +103,15 @@ const CueLatency = (() => {
   // -------------------------------------------------------------------------
   function analyzeSession(sessionData) {
     const timeoutSec = Number(sessionData && sessionData.timeoutSec) > 0
-      ? Number(sessionData.timeoutSec) : 30;
+      ? Number(sessionData.timeoutSec) : C.DEFAULT_TIMEOUT_SEC;
     const events = Array.isArray(sessionData && sessionData.events) ? sessionData.events : [];
 
-    const cuesBySeq = new Map(); // seq -> 冻结口令（取首次 cue-started 的文本/目标）
-    const roundOrder = []; // 全部轮次（按事件行序）
-    const roundsByAttempt = new Map(); // attemptId -> round
-    const roundsBySeq = new Map(); // seq -> [round...]（含未携带 attemptId 的合成日志兜底）
-    const orphanStale = [];
+    // 同一状态机：复盘逐帧渲染与场次对比也是从这份折叠结果取数
+    const model = C.foldEvents(events, { timeoutSec });
+    // 收口：未封存轮次按完成兜底、未闭合暂停以轮次收口截断、顺延截止时刻
+    C.finalizeModel(model);
 
-    const ensureCue = (seq) => {
-      let cue = cuesBySeq.get(seq);
-      if (!cue) {
-        cue = {
-          seq,
-          text: '',
-          targets: [],
-          revisions: 0,
-          recallReasons: [],
-          rounds: [],
-        };
-        cuesBySeq.set(seq, cue);
-      }
-      return cue;
-    };
-
-    const openRound = (ev, attemptId, revision, text, reason) => {
-      const d = (ev && ev.detail) || {};
-      const seq = num(d.seq, 0);
-      const cue = ensureCue(seq);
-      if (!cue.text) {
-        cue.text = String(d.text || '');
-        cue.targets = Array.isArray(d.targets)
-          ? [...new Set(d.targets.map((x) => String(x).trim()).filter(Boolean))]
-          : [];
-      }
-      const round = {
-        attemptId: attemptId || null,
-        revision: num(revision, 1),
-        seq,
-        text: String(text != null && text !== '' ? text : cue.text),
-        reason: reason || null,
-        startEvent: ev ? ev.event : null,
-        startLine: ev ? ev.line : null,
-        startT: ev ? num(ev.t) : null,
-        startIso: ev ? ev.ts : null,
-        endState: null, // completed | recalled
-        endEvent: null,
-        endLine: null,
-        endT: null,
-        endIso: null,
-        budgetMs: timeoutSec * 1000,
-        deadlineT: null,
-        cue,
-        pauses: [], // {startT,endT,reason,startLine,endLine,startIso}
-        substitutions: [], // {from,to,t,line}
-        timeoutEvent: null, // {t,line,missing}
-        confirms: [], // {position,late,t,line,duplicateEvents:[{t,line}]}
-        rejectedPauses: [], // 暂停中确认被拒 {position,t,line}
-        stale: [], // 归属到本轮的旧轮次拒绝（attemptId 与本轮不符）
-      };
-      cue.rounds.push(round);
-      cue.revisions = Math.max(cue.revisions, round.revision);
-      if (round.revision > 1 && reason && !cue.recallReasons.includes(reason)) {
-        cue.recallReasons.push(reason);
-      }
-      if (attemptId) roundsByAttempt.set(attemptId, round);
-      if (!roundsBySeq.has(seq)) roundsBySeq.set(seq, []);
-      roundsBySeq.get(seq).push(round);
-      roundOrder.push(round);
-      return round;
-    };
-
-    // 按 attemptId 精确归属；缺失 / 找不到 attemptId 时退回该 seq 的最新轮次
-    // （真实日志中轮次事件均携带 attemptId，退回仅为合成 / 损坏日志的健壮兜底）
-    function roundOf(d) {
-      if (d.attemptId && roundsByAttempt.has(String(d.attemptId))) {
-        return roundsByAttempt.get(String(d.attemptId));
-      }
-      const seq = num(d.seq, 0);
-      const list = roundsBySeq.get(seq);
-      return list && list.length ? list[list.length - 1] : null;
-    }
-
-    for (const ev of events) {
-      const d = (ev && ev.detail) || {};
-      const t = num(ev.t);
-
-      switch (ev.event) {
-        case 'cue-started': {
-          openRound(ev, d.attemptId ? String(d.attemptId) : null, num(d.revision, 1), d.text, null);
-          break;
-        }
-
-        case 'cue-resent': {
-          // 同一毫秒内 cue-recalled 必然先落盘（上一轮已封存）；修订轮次另起 attemptId
-          openRound(ev, d.attemptId ? String(d.attemptId) : null,
-            num(d.revision, 1), d.text, d.reason || null);
-          break;
-        }
-
-        case 'cue-recalled': {
-          const r = roundOf(d);
-          if (r && !r.endState) {
-            r.endState = 'recalled';
-            r.endEvent = 'cue-recalled';
-            r.endLine = ev.line;
-            r.endT = t;
-            r.endIso = ev.ts;
-            if (d.reason) r.reason = String(d.reason);
-          }
-          break;
-        }
-
-        case 'cue-completed': {
-          const r = roundOf(d);
-          if (r && !r.endState) {
-            r.endState = 'completed';
-            r.endEvent = 'cue-completed';
-            r.endLine = ev.line;
-            r.endT = t;
-            r.endIso = ev.ts;
-          }
-          break;
-        }
-
-        case 'cue-paused': {
-          const r = roundOf(d);
-          if (r) {
-            r.pauses.push({
-              startT: t, endT: null, reason: String(d.reason || ''),
-              startLine: ev.line, endLine: null, startIso: ev.ts,
-            });
-          }
-          break;
-        }
-
-        case 'cue-resumed': {
-          const r = roundOf(d);
-          if (r) {
-            const open = [...r.pauses].reverse().find((p) => p.endT == null);
-            if (open) { open.endT = t; open.endLine = ev.line; }
-            else r.pauses.push({ startT: t, endT: t, reason: '', startLine: ev.line, endLine: ev.line, startIso: ev.ts });
-          }
-          break;
-        }
-
-        case 'position-substituted': {
-          const r = roundOf(d);
-          if (r && d.from && d.to) {
-            r.substitutions.push({ from: String(d.from), to: String(d.to), t, line: ev.line });
-          }
-          break;
-        }
-
-        case 'cue-timeout': {
-          const r = roundOf(d);
-          if (r && !r.timeoutEvent) {
-            r.timeoutEvent = {
-              t, line: ev.line,
-              missing: Array.isArray(d.missing) ? d.missing.map(String) : [],
-            };
-          }
-          break;
-        }
-
-        case 'confirm':
-        case 'confirm-late': {
-          const r = roundOf(d);
-          if (r && d.position) {
-            const position = String(d.position);
-            let c = r.confirms.find((x) => x.position === position);
-            if (!c) {
-              c = { position, late: ev.event === 'confirm-late', t, line: ev.line, duplicateEvents: [] };
-              r.confirms.push(c);
-            }
-            if (ev.event === 'confirm-late') c.late = true;
-          }
-          break;
-        }
-
-        case 'confirm-duplicate': {
-          const r = roundOf(d);
-          if (r && d.position) {
-            const position = String(d.position);
-            let c = r.confirms.find((x) => x.position === position);
-            if (!c) {
-              // 极端情况下首条确认日志缺失：重复确认仍证明该岗位已确认
-              c = { position, late: false, t, line: ev.line, duplicateEvents: [] };
-              r.confirms.push(c);
-            }
-            c.duplicateEvents.push({ t, line: ev.line });
-          }
-          break;
-        }
-
-        case 'paused-confirm-rejected': {
-          const r = roundOf(d);
-          if (r && d.position) r.rejectedPauses.push({ position: String(d.position), t, line: ev.line });
-          break;
-        }
-
-        case 'stale-confirm-ignored': {
-          // 迟到到达的旧轮次确认：仅按其携带的旧 attemptId 归属原轮次；
-          // 不带 attemptId（sentAttemptId 为空）时无法识别原轮次，归为孤立事件，
-          // 绝不计入当前轮次（否则会把拒绝标记错误地贴到修订轮上）
-          const oldId = d.sentAttemptId ? String(d.sentAttemptId) : null;
-          const r = oldId ? roundsByAttempt.get(oldId) : null;
-          const item = {
-            kind: 'stale-confirm', t, line: ev.line,
-            position: d.position ? String(d.position) : null,
-            sentAttemptId: oldId,
-          };
-          if (r) r.stale.push(item); else orphanStale.push(item);
-          break;
-        }
-
-        case 'stale-substitute-ignored': {
-          const oldId = d.sentAttemptId ? String(d.sentAttemptId) : null;
-          const r = oldId ? roundsByAttempt.get(oldId) : null;
-          const item = {
-            kind: 'stale-substitute', t, line: ev.line,
-            position: d.to ? String(d.to) : null,
-            sentAttemptId: oldId,
-          };
-          if (r) r.stale.push(item); else orphanStale.push(item);
-          break;
-        }
-
-        case 'stale-timeout-ignored': {
-          // 旧定时器回调被拒：携带 staleAttemptId（如召回旧轮的定时器），
-          // 或仅有 currentAttemptId=null（整场结束后的迟到回调）
-          const oldId = d.staleAttemptId ? String(d.staleAttemptId) : null;
-          const r = (oldId && roundsByAttempt.get(oldId)) || (d.seq ? roundOf(d) : null);
-          const item = {
-            kind: 'stale-timeout', t, line: ev.line, position: null, sentAttemptId: oldId,
-          };
-          if (r) r.stale.push(item); else orphanStale.push(item);
-          break;
-        }
-
-        default:
-          break;
-      }
-    }
-
-    // 防御：session-start → sequence-finished 闭合场次的最后一轮必有
-    // cue-completed；若日志损坏缺失封存事件，以轮次后下一个边界事件时刻收口
-    for (const round of roundOrder) {
-      if (!round.endState) {
-        round.endState = 'completed';
-        round.endEvent = round.startEvent;
-        round.endLine = round.startLine;
-        round.endT = round.startT;
-        round.endIso = round.startIso;
-      }
-    }
+    const roundOrder = model.rounds;
 
     // ---------------------------------------------------------------------
     // 逐轮生成目标岗位行（瀑布数据）
@@ -364,10 +125,10 @@ const CueLatency = (() => {
 
     for (const round of roundOrder) finalizeRound(round, positions, addPos);
 
-    const cues = [...cuesBySeq.values()].sort((a, b) => a.seq - b.seq);
+    const cues = [...model.cues].sort((a, b) => a.seq - b.seq);
     cues.forEach((cue) => buildCueTotals(cue));
 
-    const summary = buildSummary(cues, roundOrder, orphanStale);
+    const summary = buildSummary(cues, roundOrder, model.orphanStale);
 
     return {
       session: sessionData.session || null,
@@ -375,14 +136,14 @@ const CueLatency = (() => {
       positions,
       cues,
       rounds: roundOrder,
-      orphanStale,
+      orphanStale: model.orphanStale,
       summary,
     };
   }
 
   // 某轮在 t 时刻的有效目标：被替岗的原岗位由替补顶替（与服务端口径一致）
   function effectiveAt(round, t) {
-    return round.cue.targets.map((origin) => {
+    return round.targets.map((origin) => {
       const sub = round.substitutions
         .filter((s) => s.from === origin && s.t <= t)
         .pop();
@@ -391,22 +152,11 @@ const CueLatency = (() => {
   }
 
   function finalizeRound(round, positions, addPos) {
-    // 未闭合暂停（日志损坏 / 轮次被重置中断）：以轮次收口时刻截断，不产生负时长
-    round.pauses.forEach((p) => {
-      if (p.endT == null) {
-        p.endT = round.endT != null ? Math.max(p.startT, round.endT) : p.startT;
-        p.unclosed = true;
-      }
-    });
-    round.pausedTotalMs = round.pauses.reduce((sum, p) => sum + Math.max(0, p.endT - p.startT), 0);
-
-    // 有效截止时刻 = 初始时限 + 累计暂停时长（恢复时按冻结余量重排 deadline 的等价结果）
-    round.deadlineT = round.startT + round.budgetMs + round.pausedTotalMs;
-
+    // 未闭合暂停的截断、pausedTotalMs 与 deadlineT 的顺延均已由内核收口完成
     const timeoutMissing = round.timeoutEvent ? round.timeoutEvent.missing : [];
     const timeoutT = round.timeoutEvent ? round.timeoutEvent.t : null;
 
-    round.rows = round.cue.targets.map((origin) => {
+    round.rows = round.targets.map((origin) => {
       // 该槽位最终的接管关系（轮次结束前最后一次生效的替岗）
       const subs = round.substitutions.filter((s) => s.from === origin);
       const sub = subs.length ? subs[subs.length - 1] : null;
@@ -501,7 +251,7 @@ const CueLatency = (() => {
     round.stats = buildRoundStats(round);
   }
 
-  // [fromT,toT] 内的暂停总时长（仅统计已闭合区间）
+  // [fromT,toT] 内的暂停总时长（仅统计已闭合区间；内核已保证全部闭合）
   function activePausedMs(pauses, fromT, toT) {
     let sum = 0;
     for (const p of pauses) {
